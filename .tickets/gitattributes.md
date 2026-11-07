@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 3
 deps: [tui-dummy]
 attachments: []
 created: 2026-11-07T17:03:36Z
-updated: 2026-11-07T22:53:01Z
+updated: 2026-11-07T22:53:38Z
+closed-at: 2026-11-07T22:53:38Z
 ---
 # Pin LF line endings with .gitattributes
 
