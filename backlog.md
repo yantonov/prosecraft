@@ -1,6 +1,5 @@
 ## Active
 - [ ] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
-- [>] Status line and quit paths #status-quit <- [tui-dummy]
 - [ ] Harness trait and claude argv builder #harness-trait <- [harness-bootstrap]
 - [ ] Marker extraction and error states #marker-extract <- [pane-routing]
 - [ ] Output pane from final text, debug pane from stream #pane-routing <- [editor-wrap, process-spawn]
@@ -21,4 +20,5 @@
 - [x] CLI args and startup validation #args-cli <- [tui-dummy]
 - [x] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
 - [x] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]
+- [x] Status line and quit paths #status-quit <- [tui-dummy]
 - [x] Makefile install target: release build, stamp git hash, copy to ~/.local/bin #zzfl3
