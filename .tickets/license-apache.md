@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 2
 deps: [tui-dummy]
 attachments: []
 created: 2026-11-07T15:42:27Z
-updated: 2026-11-07T15:43:43Z
+updated: 2026-11-07T22:52:21Z
 ---
 # Apache 2.0 licence: Yury Antonov, 2026
 

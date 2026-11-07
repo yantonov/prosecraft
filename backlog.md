@@ -6,7 +6,7 @@
 - [ ] Rewrite validation and state machine #rewrite-flow <- [clipboard, marker-extract]
 - [ ] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
 - [ ] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]
-- [ ] Apache 2.0 licence: Yury Antonov, 2026 #license-apache <- [tui-dummy]
+- [>] Apache 2.0 licence: Yury Antonov, 2026 #license-apache <- [tui-dummy]
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [ ] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [pane-routing]

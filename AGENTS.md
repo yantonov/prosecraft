@@ -7,6 +7,8 @@ press one key, read the result on the right. It exists so an iterative rewrite c
 keypress instead of a chat window.
 Stack: Rust 2024 (toolchain 1.99.1), ratatui 0.30.2 + crossterm 0.29.0, no database, no
 cache, no persistence.
+Licence: Apache 2.0, held by Yury Antonov. The full text is in `LICENSE`; there are no
+per-file headers, deliberately.
 
 Design source: `docs/spec.md`. It is the contract every ticket is written against.
 
