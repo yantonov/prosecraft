@@ -6,7 +6,6 @@
 - [ ] Rewrite validation and state machine #rewrite-flow <- [clipboard, marker-extract]
 - [ ] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
 - [ ] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]
-- [>] Editor wrapping: soft-wrap rendering and wrap-aware movement #editor-wrap <- [editor-widget]
 - [ ] Apache 2.0 licence: Yury Antonov, 2026 #license-apache <- [tui-dummy]
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
@@ -21,4 +20,5 @@
 - [x] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]
 - [x] Status line and quit paths #status-quit <- [tui-dummy]
 - [x] Harness trait and claude argv builder #harness-trait <- [harness-bootstrap]
+- [x] Editor wrapping: soft-wrap rendering and wrap-aware movement #editor-wrap <- [editor-widget]
 - [x] Makefile install target: release build, stamp git hash, copy to ~/.local/bin #zzfl3
