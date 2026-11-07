@@ -34,13 +34,22 @@ impl Harness {
     }
 }
 
+/// The crate version plus the revision `build.rs` stamped in, so a binary on `PATH` can
+/// say which commit it is. One string for both `-V` and `--version`.
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("PROSECRAFT_BUILD"),
+    ")"
+);
+
 /// Parsed command line. Required-ness, conflicts, and values are all clap's job, so an
 /// unknown `--harness` or a `--prompt`/`--prompt-file` pair exits 2 with usage.
 #[derive(Debug, Parser)]
 #[command(
     name = "prosecraft",
     bin_name = "prosecraft",
-    version,
+    version = VERSION,
     about = "Rewrite a block of text with an installed LLM harness"
 )]
 pub struct Args {

@@ -5,7 +5,7 @@
 # than `grep`+`##` self-documenting comments: the public/internal split is a judgement
 # call that belongs in prose, and `##` markers drift out of sync with the targets.
 
-.PHONY: help help-all check build run test fmt clippy fmt-check setup clean
+.PHONY: help help-all check build build-release install run test fmt clippy fmt-check setup clean
 
 .DEFAULT_GOAL := help
 
@@ -16,6 +16,7 @@ help:
 	@echo ""
 	@echo "  check    - Full verification: format check + clippy (deny warnings) + tests"
 	@echo "  build    - Debug build"
+	@echo "  install  - Release build, copied to ~/.local/bin/prosecraft"
 	@echo "  run      - Build and run the TUI (extra args: make run ARGS=\"...\")"
 	@echo "  test     - Run the test suite"
 	@echo "  fmt      - Apply rustfmt to the whole crate"
@@ -27,15 +28,17 @@ help-all:
 	@echo "Public targets:"
 	@echo "  check    - Full verification: format check + clippy (deny warnings) + tests"
 	@echo "  build    - Debug build"
+	@echo "  install  - Release build, copied to ~/.local/bin/prosecraft"
 	@echo "  run      - Build and run the TUI (extra args: make run ARGS=\"...\")"
 	@echo "  test     - Run the test suite"
 	@echo "  fmt      - Apply rustfmt to the whole crate"
 	@echo "  clippy   - Run clippy over the code and the tests"
 	@echo ""
-	@echo "Internal targets (typically called via check):"
-	@echo "  fmt-check  - Verify formatting without writing files"
-	@echo "  setup      - Fetch dependencies and print the active toolchain"
-	@echo "  clean      - Remove build artifacts (target/)"
+	@echo "Internal targets (typically called via check or install):"
+	@echo "  build-release - Release build, the artifact install copies"
+	@echo "  fmt-check     - Verify formatting without writing files"
+	@echo "  setup         - Fetch dependencies and print the active toolchain"
+	@echo "  clean         - Remove build artifacts (target/)"
 
 # Prerequisites run in order and make stops at the first failure. That is deliberate:
 # formatting noise should be cleared before type errors are read, and a red step is
@@ -45,6 +48,19 @@ check: fmt-check clippy test
 
 build:
 	@$(CARGO) build
+
+# The release profile is a separate target because it produces a different artifact in a
+# different directory; `build` stays the fast debug build the dev loop uses.
+build-release:
+	@$(CARGO) build --release
+
+# Prerequisite, not a recipe line: make stops at the first failing prerequisite, so a
+# broken build leaves the binary on PATH untouched instead of replacing it with a stale
+# copy. The artifact path is the build-release output by construction.
+install: build-release
+	@mkdir -p "$$HOME/.local/bin"
+	@cp target/release/prosecraft "$$HOME/.local/bin/prosecraft"
+	@echo "Installed: $$HOME/.local/bin/prosecraft"
 
 run:
 	@$(CARGO) run -- $(ARGS)

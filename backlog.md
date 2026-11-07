@@ -21,3 +21,4 @@
 - [x] CLI args and startup validation #args-cli <- [tui-dummy]
 - [x] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
 - [x] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]
+- [x] Makefile install target: release build, stamp git hash, copy to ~/.local/bin #zzfl3
