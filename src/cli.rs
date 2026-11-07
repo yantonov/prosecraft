@@ -111,6 +111,9 @@ fn attach_usage(err: clap::Error) -> clap::Error {
 pub struct Config {
     pub harness: Harness,
     pub model: Option<String>,
+    /// `None` until the first rewrite creates a session (spec §5). The status line shows an
+    /// em-dash while it is absent, which is why this is not defaulted to an empty string.
+    pub session_id: Option<String>,
     pub initial_source: String,
     pub initial_instructions: String,
 }
@@ -219,6 +222,8 @@ pub fn assemble(
     Ok(Config {
         harness: args.harness,
         model: args.model,
+        // Created lazily on the first `Ctrl+R`; startup never starts a session.
+        session_id: None,
         initial_source,
         initial_instructions,
     })

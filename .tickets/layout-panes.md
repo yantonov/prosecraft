@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 2
 deps: [args-cli, tui-dummy]
 attachments: []
 created: 2026-11-07T15:33:44Z
-updated: 2026-11-07T15:36:09Z
+updated: 2026-11-07T16:38:01Z
 ---
 # Four-pane layout and focus cycling
 

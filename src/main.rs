@@ -17,8 +17,10 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use cli::{Config, PlaceholderClipboard};
+use layout::Focus;
 
 mod cli;
+mod layout;
 mod ui;
 
 fn main() -> ExitCode {
@@ -49,8 +51,12 @@ fn main() -> ExitCode {
 struct Tui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     /// Assembled at startup and immutable for the run, per spec §3; the pane tickets
-    /// draw from it. Unused for now.
-    _config: Config,
+    /// draw from it.
+    config: Config,
+    /// UI state, not terminal state: the four-pane layout and its focus index.
+    focus: Focus,
+    output_scroll: u16,
+    debug_scroll: u16,
 }
 
 impl Tui {
@@ -75,18 +81,41 @@ impl Tui {
         execute!(stdout, EnterAlternateScreen)?;
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(stdout))?,
-            _config: config,
+            config,
+            focus: Focus::Source,
+            output_scroll: 0,
+            debug_scroll: 0,
         })
     }
 
     fn run(&mut self) -> io::Result<()> {
-        let terminal = &mut self.terminal;
+        let Self {
+            terminal,
+            config,
+            focus,
+            output_scroll,
+            debug_scroll,
+        } = self;
+
+        let mut view = ui::View::new(config, *focus);
+        view.output_scroll = *output_scroll;
+        view.debug_scroll = *debug_scroll;
+
         event_loop(
-            || {
-                terminal.draw(ui::render)?;
+            &mut view,
+            |view| {
+                terminal.draw(|frame| ui::render(frame, view))?;
                 Ok(())
             },
-            event::read,
+            |view| {
+                let event = event::read()?;
+                if let Event::Key(key) = &event {
+                    // Focus keys only for now; the rest of the §4 key table belongs to the
+                    // pane-routing, rewrite and quit tickets.
+                    view.handle_key(key);
+                }
+                Ok(event)
+            },
         )
     }
 }
@@ -99,15 +128,17 @@ impl Drop for Tui {
 
 /// Draws, then waits for one event, until an event asks to quit.
 ///
-/// The terminal is passed in as a closure so the quit decision can be tested without
-/// a TTY.
-fn event_loop(
-    mut draw: impl FnMut() -> io::Result<()>,
-    mut next_event: impl FnMut() -> io::Result<Event>,
+/// The terminal and the event source are closures so both the draw and the quit decision can
+/// be tested without a TTY. The state they read and update is a parameter rather than a
+/// capture, because two closures capturing the same `&mut` cannot be built at all.
+fn event_loop<S>(
+    state: &mut S,
+    mut draw: impl FnMut(&mut S) -> io::Result<()>,
+    mut next_event: impl FnMut(&mut S) -> io::Result<Event>,
 ) -> io::Result<()> {
     loop {
-        draw()?;
-        if is_exit_event(next_event()?) {
+        draw(state)?;
+        if is_exit_event(next_event(state)?) {
             return Ok(());
         }
     }
@@ -174,11 +205,12 @@ mod tests {
 
         let mut draws = 0;
         let result = event_loop(
-            || {
-                draws += 1;
+            &mut draws,
+            |draws| {
+                *draws += 1;
                 Ok(())
             },
-            || {
+            |_| {
                 Ok(events
                     .next()
                     .expect("event_loop over-read its event source"))
@@ -193,8 +225,9 @@ mod tests {
     #[test]
     fn loop_propagates_draw_errors() {
         let result = event_loop(
-            || Err(io::Error::other("draw failed")),
-            || unreachable!("must not wait for an event after a failed draw"),
+            &mut (),
+            |_| Err(io::Error::other("draw failed")),
+            |_| unreachable!("must not wait for an event after a failed draw"),
         );
 
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
