@@ -9,7 +9,7 @@
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [ ] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [pane-routing]
-- [ ] Pin LF line endings with .gitattributes #gitattributes <- [tui-dummy]
+- [>] Pin LF line endings with .gitattributes #gitattributes <- [tui-dummy]
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]

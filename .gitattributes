@@ -1,0 +1,17 @@
+# Line endings are pinned to LF so a file's bytes do not depend on the contributor's
+# core.autocrlf or on which editor last saved it. Without this, a Windows checkout with
+# autocrlf=true rewrites every .rs file on commit and the diff shows whole-file rewrites
+# instead of one changed line.
+#
+# Rust sources: rustfmt and clippy do not care, but a mixed-ending file makes every later
+# diff unreadable, and that is the cost this line removes.
+*.rs text eol=lf
+
+# Cards, docs and backlog are generated and compared as text.
+*.md text eol=lf
+
+# Pinned so the lockfile does not churn between platforms.
+Cargo.lock text eol=lf
+
+# Nothing is needed for build output: `target/` is already gitignored, so no build artifact
+# is ever a candidate for normalisation.
