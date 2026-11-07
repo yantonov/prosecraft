@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 0
 deps: [tui-dummy]
 attachments: []
 created: 2026-11-07T15:33:41Z
-updated: 2026-11-07T15:41:41Z
+updated: 2026-11-07T15:54:43Z
 ---
 # Bootstrap harness: AGENTS.md + Makefile
 
