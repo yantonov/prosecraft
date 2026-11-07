@@ -25,6 +25,7 @@ mod editor;
 mod harness;
 mod layout;
 mod ui;
+mod wrap;
 
 fn main() -> ExitCode {
     // `parse` is the exit-0 path for -h/-V and the exit-2 path for CLI misuse; both

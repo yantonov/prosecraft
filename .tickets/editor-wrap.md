@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 2
 deps: [editor-widget]
 attachments: []
 created: 2026-11-07T15:34:58Z
-updated: 2026-11-07T15:41:37Z
+updated: 2026-11-07T22:22:33Z
 ---
 # Editor wrapping: soft-wrap rendering and wrap-aware movement
 

@@ -6,7 +6,7 @@
 - [ ] Rewrite validation and state machine #rewrite-flow <- [clipboard, marker-extract]
 - [ ] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
 - [ ] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]
-- [ ] Editor wrapping: soft-wrap rendering and wrap-aware movement #editor-wrap <- [editor-widget]
+- [>] Editor wrapping: soft-wrap rendering and wrap-aware movement #editor-wrap <- [editor-widget]
 - [ ] Apache 2.0 licence: Yury Antonov, 2026 #license-apache <- [tui-dummy]
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
