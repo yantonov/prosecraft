@@ -20,6 +20,7 @@ use cli::{Config, PlaceholderClipboard};
 use layout::Focus;
 
 mod cli;
+mod editor;
 mod layout;
 mod ui;
 

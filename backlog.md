@@ -1,7 +1,6 @@
 ## Active
 - [ ] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
-- [ ] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
-- [>] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]
+- [>] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
 - [ ] Status line and quit paths #status-quit <- [tui-dummy]
 - [ ] Harness trait and claude argv builder #harness-trait <- [harness-bootstrap]
 - [ ] Marker extraction and error states #marker-extract <- [pane-routing]
@@ -19,3 +18,4 @@
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
 - [x] Dummy empty TUI app #tui-dummy
 - [x] CLI args and startup validation #args-cli <- [tui-dummy]
+- [x] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]

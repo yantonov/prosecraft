@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 2
 deps: [layout-panes, tui-dummy]
 attachments: []
 created: 2026-11-07T15:33:44Z
-updated: 2026-11-07T15:36:09Z
+updated: 2026-11-07T16:46:41Z
 ---
 # Editor core: buffer, cursor, edit operations
 
