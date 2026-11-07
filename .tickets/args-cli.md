@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 0
 deps: [tui-dummy]
 attachments: []
 created: 2026-11-07T15:33:44Z
-updated: 2026-11-07T15:36:05Z
+updated: 2026-11-07T16:28:42Z
 ---
 # CLI args and startup validation
 

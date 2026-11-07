@@ -1,6 +1,5 @@
 ## Active
-- [>] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
-- [ ] CLI args and startup validation #args-cli <- [tui-dummy]
+- [>] CLI args and startup validation #args-cli <- [tui-dummy]
 - [ ] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
 - [ ] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
 - [ ] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]
@@ -18,4 +17,5 @@
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 
 ## Closed
+- [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
 - [x] Dummy empty TUI app #tui-dummy

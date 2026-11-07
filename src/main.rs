@@ -1,14 +1,12 @@
-//! Minimal ratatui shell: draw one frame, quit on `Ctrl+Q` (`q` also works).
+//! Startup: parse the command line, validate it, then take over the terminal.
 //!
-//! This exists only to prove terminal setup/teardown: raw mode, alternate screen, and a
-//! panic that cannot leave the user's terminal broken. Deliberately no panes, no args,
-//! no harness, no clipboard.
-//!
-//! The terminal-ownership code here is expected to be moved behind argument parsing by a
-//! later ticket; duplicating it now is the shortest path to a proven clean exit.
+//! The split matters (spec §3): clap runs first so `--help`/`--version` work with no
+//! harness installed, the harness binary is checked next, the `--*-file` reads follow,
+//! and only then is raw mode entered. Nothing in [`cli`] touches the terminal.
 
 use std::io::{self, Stdout, Write};
 use std::panic;
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor;
@@ -18,24 +16,51 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+use cli::{Config, PlaceholderClipboard};
+
+mod cli;
 mod ui;
 
-fn main() -> io::Result<()> {
-    Tui::start()?.run()
+fn main() -> ExitCode {
+    // `parse` is the exit-0 path for -h/-V and the exit-2 path for CLI misuse; both
+    // happen here, before the harness check, which is what makes them work uninstalled.
+    let args = cli::parse();
+
+    let mut clipboard = PlaceholderClipboard;
+    let config = match cli::assemble(args, cli::binary_on_path, &mut clipboard) {
+        Ok(config) => config,
+        Err(err) => {
+            // One line on stderr. No terminal state was touched yet, so the user's shell
+            // is still usable when the app refuses to start.
+            eprintln!("{err}");
+            return ExitCode::from(err.exit_code());
+        }
+    };
+
+    match Tui::start(config).and_then(|mut tui| tui.run()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("prosecraft: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 struct Tui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Assembled at startup and immutable for the run, per spec §3; the pane tickets
+    /// draw from it. Unused for now.
+    _config: Config,
 }
 
 impl Tui {
-    fn start() -> io::Result<Self> {
+    fn start(config: Config) -> io::Result<Self> {
         // The hook must be in place before we touch the terminal, otherwise a panic
         // during setup (or the first draw) would strand the user in raw mode.
         install_panic_hook();
 
         terminal::enable_raw_mode()?;
-        match Self::enter_alternate_screen() {
+        match Self::enter_alternate_screen(config) {
             Ok(tui) => Ok(tui),
             // Raw mode is already on, and the failed value never reaches a Drop guard.
             Err(err) => {
@@ -45,11 +70,12 @@ impl Tui {
         }
     }
 
-    fn enter_alternate_screen() -> io::Result<Self> {
+    fn enter_alternate_screen(config: Config) -> io::Result<Self> {
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(stdout))?,
+            _config: config,
         })
     }
 
