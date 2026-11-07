@@ -1,6 +1,6 @@
 ## Active
 - [ ] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
-- [ ] Harness trait and claude argv builder #harness-trait <- [harness-bootstrap]
+- [>] Harness trait and claude argv builder #harness-trait <- [harness-bootstrap]
 - [ ] Marker extraction and error states #marker-extract <- [pane-routing]
 - [ ] Output pane from final text, debug pane from stream #pane-routing <- [editor-wrap, process-spawn]
 - [ ] Process spawn and stream readers #process-spawn <- [harness-trait]

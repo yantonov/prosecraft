@@ -22,6 +22,7 @@ use ui::Outcome;
 
 mod cli;
 mod editor;
+mod harness;
 mod layout;
 mod ui;
 

@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 2
 deps: [harness-bootstrap]
 attachments: []
 created: 2026-11-07T15:33:47Z
-updated: 2026-11-07T15:36:14Z
+updated: 2026-11-07T22:14:09Z
 ---
 # Harness trait and claude argv builder
 
