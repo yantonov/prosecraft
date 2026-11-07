@@ -1,6 +1,6 @@
 ## Active
 - [ ] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
-- [ ] Dummy empty TUI app #tui-dummy
+- [>] Dummy empty TUI app #tui-dummy
 - [ ] CLI args and startup validation #args-cli <- [tui-dummy]
 - [ ] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
 - [ ] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]

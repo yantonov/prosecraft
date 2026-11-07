@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 0
 deps: []
 attachments: []
 created: 2026-11-07T15:33:41Z
-updated: 2026-11-07T15:36:05Z
+updated: 2026-11-07T15:45:24Z
 ---
 # Dummy empty TUI app
 
