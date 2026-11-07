@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 2
 deps: [tui-dummy]
 attachments: []
 created: 2026-11-07T15:33:44Z
-updated: 2026-11-07T15:36:53Z
+updated: 2026-11-07T21:40:39Z
 ---
 # Status line and quit paths
 

@@ -18,6 +18,51 @@ use crate::layout::{self, Focus};
 /// single cell reads as a caret without needing a styled-background pass over the buffer.
 const CURSOR: &str = "▏";
 
+/// Shown instead of quitting when the quit key arrives mid-rewrite (spec §4: "Quit; confirm
+/// if a rewrite is running"). Accepting the confirmation is the robustness ticket, so this
+/// ticket only has to get the prompt onto the status line.
+const CONFIRM_QUIT: &str = "press Ctrl+Q again to quit";
+
+/// Shown for `Ctrl+C` mid-rewrite. Spec §4 makes that key a cancel rather than a quit, and
+/// cancelling is the robustness ticket, so the key is ignored here and says so.
+const CANCEL_UNIMPLEMENTED: &str = "Ctrl+C cancels, but cancel is not implemented yet";
+
+/// The state word on the status line (spec §4: `idle` / `running` / `error`).
+///
+/// Three values and no transitions: the rewrite flow that drives them is a later ticket, so
+/// this ticket only has to render the word and let a test set each value directly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum State {
+    #[default]
+    Idle,
+    Running,
+    // Reached only from the rewrite flow, which is a later ticket: nothing outside the tests
+    // constructs it yet, and the variant has to exist now because the status line renders it.
+    #[allow(dead_code)]
+    Error,
+}
+
+impl State {
+    /// Spelled exactly as spec §4 spells it, because these are the words the user reads.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// The only thing a key can tell the event loop: carry on, or stop.
+///
+/// Focus and editing stay inside this module as view state, so a quit decision is the sole
+/// answer that has to travel back out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Continue,
+    Quit,
+}
+
 /// Everything the frame needs that is not geometry. `Debug` so tests can build a fixed one.
 #[derive(Debug, Clone)]
 pub struct View<'a> {
@@ -29,6 +74,12 @@ pub struct View<'a> {
     pub debug: &'a str,
     pub output_scroll: u16,
     pub debug_scroll: u16,
+    pub state: State,
+    /// One-line note beside the state word: validation text, an error, the quit prompt, or
+    /// how the last run ended (a cancelled rewrite returns to `Idle` with its note here).
+    /// Kept apart from [`State`] because the word must stay one of three and this is free
+    /// text that may be arbitrarily long.
+    pub message: Option<String>,
 }
 
 impl<'a> View<'a> {
@@ -42,18 +93,31 @@ impl<'a> View<'a> {
             debug: "",
             output_scroll: 0,
             debug_scroll: 0,
+            state: State::Idle,
+            message: None,
         }
     }
 
-    /// Applies the §4 focus keys: `Tab`/`Shift+Tab` in reading order, `Ctrl+Left`/`Ctrl+Right`
-    /// across columns. Every other key is ignored here because the rest of the key table is
-    /// owned by the pane-routing, rewrite and quit tickets.
-    pub fn handle_key(&mut self, key: &KeyEvent) {
+    /// Applies the §4 keys this ticket owns: focus, quit, and the keys that must do nothing.
+    /// Returns whether the run is over.
+    ///
+    /// The state is read here rather than by the caller because the same key does not always
+    /// mean the same thing: spec §4 makes `Ctrl+C` a quit while idle and a cancel while a
+    /// rewrite runs, so the key cannot be decoded without the state in hand.
+    pub fn handle_key(&mut self, key: &KeyEvent) -> Outcome {
         // Windows reports a press and a release for every keystroke; acting on both would
-        // cycle focus twice per Tab press.
+        // cycle focus twice per Tab press and quit when `q` is released.
         if key.kind != KeyEventKind::Press {
-            return;
+            return Outcome::Continue;
         }
+        if is_quit(*key) {
+            return self.request_quit();
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            return self.interrupt();
+        }
+        // Esc stays in the fall-through arm on purpose: spec §4 fixes it as "does nothing in
+        // v0.1", and a key silently doing something later is harder to notice than a test.
         self.focus = match (key.code, key.modifiers) {
             // Terminals disagree on how Shift+Tab arrives, so both spellings are accepted.
             (KeyCode::Tab, KeyModifiers::SHIFT) | (KeyCode::BackTab, _) => self.focus.prev(),
@@ -64,6 +128,30 @@ impl<'a> View<'a> {
             }
             _ => self.focus,
         };
+        Outcome::Continue
+    }
+
+    /// `Ctrl+Q` from any focus state: quit, unless a rewrite is running and spec §4 asks for
+    /// a confirmation first.
+    fn request_quit(&mut self) -> Outcome {
+        if self.state == State::Running {
+            self.message = Some(CONFIRM_QUIT.to_owned());
+            return Outcome::Continue;
+        }
+        Outcome::Quit
+    }
+
+    /// `Ctrl+C`: quit when there is nothing to cancel, otherwise cancel the harness — which
+    /// is the robustness ticket's half, so mid-run this deliberately ignores the key instead
+    /// of pretending to have cancelled.
+    fn interrupt(&mut self) -> Outcome {
+        match self.state {
+            State::Running => {
+                self.message = Some(CANCEL_UNIMPLEMENTED.to_owned());
+                Outcome::Continue
+            }
+            State::Idle | State::Error => Outcome::Quit,
+        }
     }
 
     fn content(&self, focus: Focus) -> (&'a str, u16) {
@@ -141,18 +229,62 @@ fn with_cursor(text: &str) -> String {
     format!("{text}{CURSOR}")
 }
 
-/// One line, always: the spec puts a long error here and a wrapped status line would resize
-/// the panes. Content is refined by the status-quit ticket.
+/// One line, always: spec §8 puts a long error here, and a status line that wrapped would
+/// resize the panes. [`fit`] is what keeps that promise.
+///
+/// Field order is spec §4's: harness, session, state, then the key hints. The note is not a
+/// field in that list, so it is inserted just before the hints; that keeps every fixed field
+/// in its place and makes clipping eat the static hints rather than an error the user needs.
 fn draw_status(frame: &mut Frame, view: &View, area: Rect) {
     let session = view.config.session_id.as_deref().unwrap_or("—");
-    let line = format!(
-        " {} │ {} │ {} │ [Ctrl+R] rewrite  [Tab] focus  [Ctrl+Q] quit",
+    let mut line = format!(
+        " {} │ {} │ {}",
         view.config.harness.binary_name(),
         session,
-        "idle",
+        view.state.label(),
     );
-    let paragraph = Paragraph::new(Line::from(line)).wrap(Wrap { trim: true });
-    frame.render_widget(paragraph, area);
+    if let Some(message) = &view.message {
+        line.push_str(" │ ");
+        line.push_str(message);
+    }
+    line.push_str(" │ [Ctrl+R] rewrite  [Tab] focus  [Ctrl+Q] quit");
+    // No `Wrap`: the line is already guaranteed to fit, and leaving wrapping off makes
+    // "never wraps" a property of the code rather than of the widget's defaults.
+    frame.render_widget(Paragraph::new(Line::from(fit(&line, area.width))), area);
+}
+
+/// Truncates `text` to `width` display cells, ending in `…` when it had to cut.
+///
+/// Cells, not bytes: `…` is one cell but three bytes, so a byte-based cut would either spill
+/// past the row or split a character. The width rule is ratatui's own, reached through
+/// `Line` so nothing here has to depend on the width crate directly.
+fn fit(text: &str, width: u16) -> String {
+    let available = usize::from(width);
+    // A zero-width area shows nothing: an ellipsis would still need one cell.
+    if available == 0 {
+        return String::new();
+    }
+    if display_width(text) <= available {
+        return text.to_owned();
+    }
+    // The ellipsis spends a cell of its own, so the kept prefix may claim only the rest.
+    let budget = available - 1;
+    let mut out = String::new();
+    for c in text.chars() {
+        out.push(c);
+        if display_width(&out) > budget {
+            out.pop();
+            break;
+        }
+    }
+    out.push('…');
+    out
+}
+
+/// Rendered width of `text` in terminal cells, counting a wide glyph as two - the same count
+/// the renderer uses to place the cell after it.
+fn display_width(text: &str) -> usize {
+    Line::from(text).width()
 }
 
 /// Plain `q` is accepted alongside `Ctrl+Q` so the quit path can be driven without a
@@ -561,6 +693,240 @@ mod tests {
         }
     }
 
+    /// Draws a view with the given state and message, then returns its status row.
+    fn status_row(state: State, message: Option<&str>, width: u16) -> String {
+        let config = config();
+        let mut view = View::new(&config, Focus::Source);
+        view.state = state;
+        view.message = message.map(str::to_owned);
+        let buffer = draw_at(&view, width, 10);
+        row(&buffer, 9)
+    }
+
+    #[test]
+    fn every_state_renders_its_own_word() {
+        for (state, word) in [
+            (State::Idle, "idle"),
+            (State::Running, "running"),
+            (State::Error, "error"),
+        ] {
+            assert_eq!(state.label(), word);
+            let status = status_row(state, None, 80);
+            assert!(status.contains(word), "{state:?} not shown: {status:?}");
+            // The word sits between the session and the hints, in spec §4's order.
+            let session = status.find('—').expect("session em-dash missing");
+            let state_at = status.find(word).expect("state word missing");
+            let hints = status.find("Ctrl+R").expect("hints missing");
+            assert!(session < state_at && state_at < hints, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_message_sits_between_the_state_word_and_the_hints() {
+        let status = status_row(State::Error, Some("missing output markers"), 120);
+
+        assert!(status.contains("claude"), "harness lost: {status:?}");
+        assert!(status.contains("missing output markers"), "{status:?}");
+        // Spec §4 fixes the four fields; the note is not one of them, so it must not push
+        // any of them out of order.
+        let positions = [
+            "claude",
+            "—",
+            "error",
+            "missing output markers",
+            "Ctrl+R",
+            "Ctrl+Q",
+        ]
+        .map(|needle| {
+            status
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing from {status:?}"))
+        });
+        let mut sorted = positions;
+        sorted.sort_unstable();
+        assert_eq!(positions, sorted, "out of order: {status:?}");
+    }
+
+    #[test]
+    fn a_cancelled_run_returns_to_idle_with_a_note() {
+        // The ticket's fake of the cancelled outcome: the state word says idle and the
+        // reason is the free-text channel, so the two never have to share one string.
+        let status = status_row(State::Idle, Some("cancelled"), 80);
+
+        assert!(status.contains("idle"), "{status:?}");
+        assert!(status.contains("cancelled"), "{status:?}");
+    }
+
+    #[test]
+    fn a_long_message_is_clipped_with_an_ellipsis_and_never_wraps() {
+        let long = "x".repeat(200);
+        let status = status_row(State::Error, Some(&long), 40);
+
+        // One row can hold 40 cells, so the row ends in the ellipsis and nothing spilled
+        // into the row above (which is a pane border, not more status).
+        assert_eq!(status.chars().count(), 40, "row changed width: {status:?}");
+        assert!(status.ends_with('…'), "no ellipsis: {status:?}");
+        assert!(
+            status.contains("claude"),
+            "the fixed fields were squeezed out"
+        );
+        assert!(status.contains("error"), "the state word was squeezed out");
+
+        let config = config();
+        let mut view = View::new(&config, Focus::Source);
+        view.state = State::Error;
+        view.message = Some(long);
+        let buffer = draw_at(&view, 40, 10);
+        let panes = layout::panes(Rect::new(0, 0, 40, 10));
+        // The row directly above the status line is still the pane bottom border: a wrapped
+        // status line would have painted over it.
+        assert_eq!(buffer[(0, panes.status.y - 1)].symbol(), "└");
+    }
+
+    #[test]
+    fn a_clipped_message_keeps_the_fixed_fields_and_says_it_was_cut() {
+        // The error path is the one that matters: the user must still see which harness and
+        // which state, and must know the note continues.
+        let status = status_row(State::Error, Some(&"boom ".repeat(40)), 60);
+
+        let positions = ["claude", "—", "error", "boom"].map(|needle| {
+            status
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing from {status:?}"))
+        });
+        let mut sorted = positions;
+        sorted.sort_unstable();
+        assert_eq!(positions, sorted, "out of order: {status:?}");
+        assert!(status.ends_with('…'), "no ellipsis: {status:?}");
+    }
+
+    #[test]
+    fn fit_keeps_short_text_and_clips_long_text_to_the_cell_count() {
+        assert_eq!(fit("abc", 10), "abc");
+        assert_eq!(fit("abc", 3), "abc", "exactly fitting text is not clipped");
+        assert_eq!(fit("abcd", 3), "ab…");
+        // A wide glyph is two cells: '世' plus the ellipsis fills 3 cells, not 2 chars.
+        assert_eq!(fit("世界", 3), "世…");
+        assert_eq!(fit("", 0), "");
+        assert_eq!(fit("abc", 0), "", "nothing fits in a zero-width row");
+        assert_eq!(
+            fit("abc", 1),
+            "…",
+            "one cell means the ellipsis and no text"
+        );
+
+        // Byte-based clipping would cut inside these; cell-based clipping must not.
+        for text in ["café", "a—b", "🙂🙂🙂", "naïve prose"] {
+            let fitted = fit(text, 3);
+            assert!(
+                display_width(&fitted) <= 3,
+                "{text:?} fitted to {fitted:?} is wider than 3 cells"
+            );
+            assert!(
+                fitted.is_char_boundary(fitted.len()),
+                "{text:?} split a character"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_q_quits_from_every_focus_state() {
+        for focus in Focus::ALL {
+            for state in [State::Idle, State::Error] {
+                let config = config();
+                let mut view = View::new(&config, focus);
+                view.state = state;
+
+                assert_eq!(
+                    view.handle_key(&ctrl(KeyCode::Char('q'))),
+                    Outcome::Quit,
+                    "Ctrl+Q from {focus:?} while {state:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_q_while_running_prompts_instead_of_quitting() {
+        let config = config();
+        let mut view = View::new(&config, Focus::Output);
+        view.state = State::Running;
+
+        assert_eq!(
+            view.handle_key(&ctrl(KeyCode::Char('q'))),
+            Outcome::Continue,
+            "Ctrl+Q quit mid-run without confirming"
+        );
+        let message = view.message.as_deref().expect("no confirmation prompt");
+        assert!(
+            message.contains("Ctrl+Q"),
+            "prompt is not actionable: {message}"
+        );
+
+        // The prompt has to be readable, which means the status line must carry it.
+        let status = row(&draw_at(&view, 120, 10), 9);
+        assert!(status.contains(message), "prompt not drawn: {status:?}");
+    }
+
+    #[test]
+    fn ctrl_c_quits_only_when_nothing_is_running() {
+        for state in [State::Idle, State::Error] {
+            let config = config();
+            let mut view = View::new(&config, Focus::Debug);
+            view.state = state;
+            assert_eq!(
+                view.handle_key(&ctrl(KeyCode::Char('c'))),
+                Outcome::Quit,
+                "Ctrl+C while {state:?}"
+            );
+        }
+
+        let config = config();
+        let mut view = View::new(&config, Focus::Source);
+        view.state = State::Running;
+        assert_eq!(
+            view.handle_key(&ctrl(KeyCode::Char('c'))),
+            Outcome::Continue,
+            "Ctrl+C quit mid-run instead of leaving the cancel half unimplemented"
+        );
+        assert!(
+            view.message.is_some(),
+            "an ignored Ctrl+C must say so in the status line"
+        );
+    }
+
+    #[test]
+    fn esc_does_nothing() {
+        for state in [State::Idle, State::Running, State::Error] {
+            let config = config();
+            let mut view = View::new(&config, Focus::Source);
+            view.state = state;
+
+            assert_eq!(
+                view.handle_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                Outcome::Continue,
+                "Esc quit while {state:?}"
+            );
+            assert_eq!(view.focus, Focus::Source, "Esc moved focus");
+            assert_eq!(view.message, None, "Esc wrote a status message");
+            assert_eq!(view.state, state, "Esc changed the state");
+        }
+    }
+
+    #[test]
+    fn a_released_quit_key_does_not_quit() {
+        // Windows sends a release after every press; quitting on it would fire twice.
+        let config = config();
+        let mut view = View::new(&config, Focus::Source);
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        );
+
+        assert_eq!(view.handle_key(&release), Outcome::Continue);
+    }
+
     fn contains(buffer: &Buffer, needle: &str) -> bool {
         (0..buffer.area.height).any(|y| row(buffer, y).contains(needle))
     }
@@ -568,7 +934,11 @@ mod tests {
     fn focus_after(key: KeyEvent, from: Focus) -> Focus {
         let config = config();
         let mut view = View::new(&config, from);
-        view.handle_key(&key);
+        assert_eq!(
+            view.handle_key(&key),
+            Outcome::Continue,
+            "{key:?} is not a quit key"
+        );
         view.focus
     }
 
