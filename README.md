@@ -25,11 +25,12 @@ prosecraft collapses it to one keypress. The screen has four panes:
   pi │ 9f1c4a2b │ idle          [Ctrl+R] rewrite  [F1] help  [Ctrl+Q] quit
 ```
 
-`Ctrl+R` sends the two editable panes to an installed harness (`claude` or `pi`) running in
-one-shot, non-interactive mode. Edit the instructions, or the text, and press `Ctrl+R`
-again: the harness session carries the conversation, so "shorter", then "less formal" builds
-on the previous answer. The output pane only ever shows the final text; the process pane
-shows the stream, the reasoning and stderr, so a slow run is visible instead of inert.
+`Ctrl+R` sends the two editable panes to an installed harness (`claude`, `pi`, or `codex`)
+running in one-shot, non-interactive mode. Edit the instructions, or the text, and press
+`Ctrl+R` again: the harness session carries the conversation, so "shorter", then "less
+formal" builds on the previous answer. The output pane only ever shows the final text; the
+process pane shows the stream, the reasoning and stderr, so a slow run is visible instead of
+inert.
 
 What it deliberately is not:
 
@@ -49,8 +50,8 @@ Requirements:
 
 - A Rust toolchain new enough for edition 2024 (there is no `rust-toolchain.toml`, so any
   recent stable works).
-- One harness installed and authenticated by you: `claude`, or `pi`. prosecraft does not
-  manage credentials, models, or provider config.
+- One harness installed and authenticated by you: `claude`, `pi`, or `codex`. prosecraft
+  does not manage credentials, models, or provider config.
 
 ```sh
 git clone git@github.com:yantonov/prosecraft.git && cd prosecraft
@@ -70,7 +71,8 @@ on stderr and exits non-zero **before** taking over the terminal, rather than op
 window it cannot use. `--help` and `--version` work either way.
 
 Linux and macOS are the primary targets; Windows is best-effort — the Windows npm shim for
-`pi` is handled by delivering the prompt on stdin instead of argv.
+`pi` is handled by delivering the prompt on stdin instead of argv. `codex` takes its prompt
+on stdin on every platform, so that limit does not apply to it.
 
 ## Usage
 
@@ -89,7 +91,31 @@ prosecraft --harness pi --prompt-file style.md --text-file draft.md
 # Different register, different model, no clipboard read at startup
 prosecraft --harness pi --model <name> --no-clipboard \
   --prompt "Make it informal, contractions are fine" --text "We regret to inform you…"
+
+# The same rewrite, through codex instead
+prosecraft --harness codex --prompt "Improve the style" --text-file draft.md
 ```
+
+## Harness differences
+
+All three are first-class, but they are not identical, and two of the differences are worth
+knowing before you pick one. Details and measurements are in `docs/spec.md` §6.
+
+**codex does not stream.** `claude` and `pi` report progress as the answer is written, so
+the process pane fills continuously. `codex` delivers the whole answer in one event: the pane
+fills in jumps, and the `running` word on the status line is what tells you a rewrite is
+under way.
+
+**codex is sandboxed rather than tool-stripped.** `claude` and `pi` can be told to have no
+tools at all. `codex` has no such switch — its tools are built in — so prosecraft runs it
+with a read-only filesystem and approvals never answered, which is what keeps a rewrite from
+touching the filesystem or the network. The observable guarantee is the same (nothing is
+written), but it is enforced one layer lower, so "tools are disabled" would be the wrong way
+to describe it.
+
+The practical differences are smaller: `codex` names its own session, so the short id on the
+status line appears after the first rewrite rather than before it, and `Ctrl+N` starts a new
+thread exactly as it does elsewhere.
 
 Inside the TUI the instruction is just text, so the second and third passes are cheap: put
 the cursor in the **instructions** pane, edit the line, press `Ctrl+R`.

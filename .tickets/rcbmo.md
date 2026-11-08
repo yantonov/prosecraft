@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 2
 deps: [x3dtv2]
 attachments: []
 created: 2026-11-08T18:05:49Z
-updated: 2026-11-08T18:05:53Z
+updated: 2026-11-08T18:25:03Z
+closed-at: 2026-11-08T18:25:03Z
 ---
 # README: codex as a third harness, and the two ways it is not equal
 
@@ -39,3 +40,19 @@ Windows shim note. A third harness is selectable but undocumented until this lan
   claiming parity.
 - No measurement tables are copied into the README; they live in the spec and the ticket.
 - `make check` green (touched no code, so this is only a guard).
+
+
+## Result
+
+- Requirements bullet names all three; the Windows paragraph adds that codex takes its prompt
+  on stdin everywhere, so the batch-shim limit does not apply to it.
+- Usage gains a `--harness codex` example alongside the existing `pi` ones.
+- New **Harness differences** section, two paragraphs, both stated as behaviour rather than
+  measurement: codex does not stream (the status line's `running` is the progress signal), and
+  codex is sandboxed rather than tool-stripped — with the explicit note that "tools are
+  disabled" would be the wrong description. Points at `docs/spec.md` §6 for the evidence
+  instead of copying tables in.
+- One sentence on the visible consequence: the session id appears after the first rewrite
+  because codex names its own thread.
+
+No measurement tables were copied; the README stays the front door. `make check` green.
