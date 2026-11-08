@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 3
 deps: [session-lifecycle]
 attachments: []
 created: 2026-11-07T15:33:50Z
-updated: 2026-11-08T09:30:48Z
+updated: 2026-11-08T09:31:05Z
+closed-at: 2026-11-08T09:31:05Z
 ---
 # Robustness: cancel, timeout, resize, error paths
 
