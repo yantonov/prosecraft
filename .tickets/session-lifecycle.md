@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: [rewrite-flow]
 attachments: []
 created: 2026-11-07T15:33:50Z
-updated: 2026-11-08T08:40:02Z
+updated: 2026-11-08T08:42:30Z
+closed-at: 2026-11-08T08:42:30Z
 ---
 # Session id lifecycle and Ctrl+N
 
