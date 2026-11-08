@@ -863,11 +863,10 @@ fn display_width(text: &str) -> usize {
     Line::from(text).width()
 }
 
-/// Plain `q` is accepted alongside `Ctrl+Q` so the quit path can be driven without a
-/// control chord, e.g. by a pty-based check that only types printable keys.
+/// `Ctrl+Q` is the only quit key (spec §4). Plain `q` has to reach the editor like any other
+/// letter: a quit branch above the editable-pane block costs the panes one character.
 pub fn is_quit(key: KeyEvent) -> bool {
-    key.code == KeyCode::Char('q')
-        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL)
+    key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL
 }
 
 #[cfg(test)]
@@ -3631,8 +3630,46 @@ mod tests {
     }
 
     #[test]
-    fn plain_q_quits() {
-        assert!(is_quit(press(KeyCode::Char('q'), KeyModifiers::NONE)));
+    fn plain_q_does_not_quit() {
+        assert!(!is_quit(press(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(!is_quit(press(KeyCode::Char('q'), KeyModifiers::SHIFT)));
+    }
+
+    /// Every printable character reaches an editable pane, and none of them quits. The table
+    /// keeps a key that is quietly reserved from coming back one letter at a time.
+    #[test]
+    fn every_printable_letter_types_instead_of_acting() {
+        for c in (' '..='~').filter(|c| c.is_ascii_graphic() || *c == ' ') {
+            let mut view = editing_view(Focus::Source, "");
+
+            assert_eq!(
+                view.handle_key(&press_char(c)),
+                Outcome::Continue,
+                "typing {c:?} acted instead of typing"
+            );
+            assert_eq!(view.source.text(), c.to_string(), "typing {c:?}");
+        }
+    }
+
+    /// A read-only pane has no cursor, so a character does nothing there — but it must not
+    /// quit either, which is what a stray `is_quit` branch would make it do.
+    #[test]
+    fn a_character_in_a_read_only_pane_does_not_quit() {
+        for focus in [Focus::Output, Focus::Debug] {
+            let config = config();
+            let mut view = View::new(&config, focus);
+
+            assert_eq!(
+                view.handle_key(&press_char('q')),
+                Outcome::Continue,
+                "q quit from {focus:?}"
+            );
+            assert_eq!(
+                view.source.text(),
+                "source text",
+                "a read-only pane was edited"
+            );
+        }
     }
 
     #[test]

@@ -306,7 +306,11 @@ mod tests {
                 KeyModifiers::CONTROL,
                 KeyEventKind::Release,
             ),
-            key(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Press),
+            key(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ),
         ]
         .into_iter();
 
