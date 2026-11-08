@@ -26,6 +26,12 @@ use crate::wrap::WrapState;
 /// ticket only has to get the prompt onto the status line.
 const CONFIRM_QUIT: &str = "press Ctrl+Q again to quit";
 
+/// Shown instead of cancelling on the first `Ctrl+C` in the debug pane (spec §4).
+///
+/// Naming the key is the whole point: a two-press cancel is only discoverable if the first
+/// press says so, which is what `CONFIRM_QUIT` already does for the quit.
+const CONFIRM_CANCEL: &str = "press Ctrl+C again to cancel the run";
+
 /// The state word on the status line (spec §4: `idle` / `running` / `error`).
 ///
 /// Three values and no transitions of its own: `View::rewrite`, `View::tick` and
@@ -89,6 +95,10 @@ pub struct View<'a> {
     pub help: bool,
     /// Whether a quit is waiting for its second `Ctrl+Q` (spec §4: confirm while running).
     pub quit_armed: bool,
+    /// Whether a cancel is waiting for its second `Ctrl+C` in the debug pane (spec §4).
+    /// Armed and cleared by [`View::interrupt`]; a run that has settled clears its own, so a
+    /// new run cannot inherit an armed cancel.
+    pub cancel_armed: bool,
     /// The rewrite state machine (spec §5). Owned by the view so a key press and a tick are the
     /// only two things that can move a run along, and both go through here.
     pub machine: Option<Box<Machine>>,
@@ -136,6 +146,7 @@ impl<'a> View<'a> {
             toast: None,
             help: false,
             quit_armed: false,
+            cancel_armed: false,
             machine: None,
             session: config.session_id.clone(),
             state: State::Idle,
@@ -147,9 +158,10 @@ impl<'a> View<'a> {
     /// Applies the §4 keys this ticket owns: focus, quit, and the keys that must do nothing.
     /// Returns whether the run is over.
     ///
-    /// The state is read here rather than by the caller because the same key does not always
-    /// mean the same thing: spec §4 makes `Ctrl+C` a quit while idle and a cancel while a
-    /// rewrite runs, so the key cannot be decoded without the state in hand.
+    /// The state and the focus are read here rather than by the caller because the same key
+    /// does not always mean the same thing: spec §4 makes `Ctrl+C` a cancel in the debug pane
+    /// while a rewrite runs and a copy everywhere else, so the key cannot be decoded from the
+    /// event alone.
     pub fn handle_key(&mut self, key: &KeyEvent) -> Outcome {
         // Windows reports a press and a release for every keystroke; acting on both would
         // cycle focus twice per Tab press and quit when `q` is released.
@@ -162,9 +174,10 @@ impl<'a> View<'a> {
         if is_quit(*key) {
             return self.request_quit();
         }
-        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-            return self.interrupt();
-        }
+        // Spec §4: `Ctrl+C` is copy everywhere and cancel only in the debug pane, so the key
+        // needs the focus as much as the state. Checked with the other chords rather than
+        // here, because the toast and help dismissals below must eat it first.
+        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
         // Spec §4: `F1` toggles the key-bindings panel. Checked before the toast arm so the
         // panel can be opened while a toast is showing, and before focus routing so it is one
         // key from every pane.
@@ -185,6 +198,9 @@ impl<'a> View<'a> {
         if self.toast.is_some() {
             self.toast = None;
             return Outcome::Continue;
+        }
+        if ctrl_c {
+            return self.interrupt();
         }
         // Ctrl+Up/Down move focus between the rows of one column. They are handled here, not
         // in the arrow arms below, because those match `Up`/`Down` whatever the modifiers are:
@@ -328,31 +344,42 @@ impl<'a> View<'a> {
         Outcome::Continue
     }
 
-    /// `Ctrl+C`: quit when there is nothing to cancel, otherwise cancel the harness — which
-    /// is the robustness ticket's half, so mid-run this deliberately ignores the key instead
-    /// of pretending to have cancelled.
+    /// `Ctrl+C` (spec §4): halt in the debug pane, copy anywhere else. It is never a quit, so
+    /// `Ctrl+Q` keeps that job alone.
+    ///
+    /// The debug pane is where the stream is visible, so it is where stopping belongs; the
+    /// other panes get the terminal user's usual meaning of the key. In debug with nothing to
+    /// halt there is no halt to offer, so the copy rule applies there too rather than the key
+    /// dying on one pane.
     fn interrupt(&mut self) -> Outcome {
-        match self.state {
-            State::Running => {
-                // Spec §4: while running, Ctrl+C cancels rather than quits. The child is asked
-                // to stop; the cancelled outcome arrives through the next tick, so this must
-                // not also change the state word now or the run would look finished before it
-                // has been reaped.
-                let asked = self
-                    .machine
-                    .as_mut()
-                    .is_some_and(|machine| machine.cancel());
-                self.message = Some(if asked {
-                    "cancelling".to_owned()
-                } else {
-                    // A live state with no child is a bug, not a user-visible case; saying so
-                    // beats a silent no-op.
-                    "nothing to cancel".to_owned()
-                });
-                Outcome::Continue
-            }
-            State::Idle | State::Error => Outcome::Quit,
+        if self.focus != Focus::Debug || self.state != State::Running {
+            self.copy();
+            return Outcome::Continue;
         }
+        // Mid-run in debug: the first press asks and the second answers, the same shape as
+        // `Ctrl+Q` while running. Anything else would be a key that kills a run in one
+        // keystroke and that the user could not tell from the copy they meant.
+        if !self.cancel_armed {
+            self.cancel_armed = true;
+            self.message = Some(CONFIRM_CANCEL.to_owned());
+            return Outcome::Continue;
+        }
+        self.cancel_armed = false;
+        // The child is asked to stop; the cancelled outcome arrives through the next tick, so
+        // this must not also change the state word now or the run would look finished before
+        // it has been reaped.
+        let asked = self
+            .machine
+            .as_mut()
+            .is_some_and(|machine| machine.cancel());
+        self.message = Some(if asked {
+            "cancelling".to_owned()
+        } else {
+            // A live state with no child is a bug, not a user-visible case; saying so beats a
+            // silent no-op.
+            "nothing to cancel".to_owned()
+        });
+        Outcome::Continue
     }
 
     /// `Ctrl+R`: validate and start a rewrite (spec §5).
@@ -434,6 +461,9 @@ impl<'a> View<'a> {
             Tick::Idle => key_changed,
             Tick::Streaming => true,
             Tick::Finished(settled) => {
+                // A prompt about this run must not survive it, or the next run would be one
+                // keypress away from cancelling.
+                self.cancel_armed = false;
                 self.state = match settled {
                     Settled::Rewritten => State::Idle,
                     // A run that produced no usable rewrite is the error state, and its reason
@@ -481,7 +511,7 @@ impl<'a> View<'a> {
         }
     }
 
-    /// `Ctrl+Y`: copy the focused pane's text.
+    /// `Ctrl+Y`, and `Ctrl+C` outside the debug pane: copy the focused pane's text.
     ///
     /// Works for the read-only panes as well as the editable ones, which is what makes the
     /// debug pane useful: its content can be taken somewhere else to read.
@@ -572,8 +602,14 @@ const HELP_ROWS: [(&str, &str); 12] = [
         "Ctrl+N",
         "new session: drop context, clear output and debug",
     ),
-    ("Ctrl+C", "cancel the run, or quit when idle"),
-    ("Ctrl+Q", "quit; confirm while a rewrite is running"),
+    (
+        "Ctrl+C",
+        "copy the focused pane; in debug, cancel the run (press twice)",
+    ),
+    (
+        "Ctrl+Q",
+        "quit; confirm while a rewrite is running; the only quit",
+    ),
     ("Tab / Shift+Tab", "cycle focus"),
     ("Ctrl+← / →", "switch column"),
     ("Ctrl+↑ / ↓", "switch row; no wrap"),
@@ -1395,33 +1431,6 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits_only_when_nothing_is_running() {
-        for state in [State::Idle, State::Error] {
-            let config = config();
-            let mut view = View::new(&config, Focus::Debug);
-            view.state = state;
-            assert_eq!(
-                view.handle_key(&ctrl(KeyCode::Char('c'))),
-                Outcome::Quit,
-                "Ctrl+C while {state:?}"
-            );
-        }
-
-        let config = config();
-        let mut view = View::new(&config, Focus::Source);
-        view.state = State::Running;
-        assert_eq!(
-            view.handle_key(&ctrl(KeyCode::Char('c'))),
-            Outcome::Continue,
-            "Ctrl+C quit mid-run instead of leaving the cancel half unimplemented"
-        );
-        assert!(
-            view.message.is_some(),
-            "an ignored Ctrl+C must say so in the status line"
-        );
-    }
-
-    #[test]
     fn esc_does_nothing() {
         for state in [State::Idle, State::Running, State::Error] {
             let config = config();
@@ -1956,6 +1965,104 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
+    /// A view with a recording clipboard installable after the fact, so `rewrite_view`'s
+    /// machine can be reused. The clip is primed empty: the point of these tests is what the
+    /// key wrote, not what a paste would read.
+    fn with_clipboard(mut view: View<'static>) -> (View<'static>, crate::clipboard::Recording) {
+        let clipboard = crate::clipboard::Recording::default();
+        let handle = clipboard.clone();
+        view.clipboard = Box::new(clipboard);
+        (view, handle)
+    }
+
+    #[test]
+    fn ctrl_c_copies_the_focused_pane_instead_of_quitting() {
+        // Every focus, idle state: the key this replaces quit from all of them.
+        for focus in [
+            Focus::Source,
+            Focus::Instructions,
+            Focus::Output,
+            Focus::Debug,
+        ] {
+            let (view, _) = rewrite_view(focus, Vec::new(), None);
+            let (mut view, clipboard) = with_clipboard(view);
+            view.source = Editor::from_text("the source");
+            view.instructions = Editor::from_text("the instructions");
+            view.stream.app("a debug line".to_owned());
+
+            assert_eq!(
+                view.handle_key(&ctrl_char('c')),
+                Outcome::Continue,
+                "Ctrl+C quits from {focus:?}"
+            );
+
+            let copied = clipboard.written();
+            if focus == Focus::Output {
+                // Nothing has ever written the output pane in this view, so `Ctrl+C` there is
+                // the empty-pane note rather than a clipboard write.
+                assert_eq!(copied, None, "an empty output pane copied something");
+                assert_eq!(view.message.as_deref(), Some("output is empty"));
+                continue;
+            }
+            let copied = copied.expect("Ctrl+C wrote nothing to the clipboard");
+            let expected = match focus {
+                Focus::Source => "the source",
+                Focus::Instructions => "the instructions",
+                // The debug pane here is idle, so it is a copy pane like any other; the
+                // running case is `ctrl_c_in_debug_while_running_asks_before_cancelling`.
+                Focus::Debug => "a debug line",
+                Focus::Output => unreachable!(),
+            };
+            assert!(
+                copied.contains(expected),
+                "{focus:?} copied the wrong text: {copied:?}"
+            );
+            assert_eq!(
+                view.message.as_deref(),
+                Some(format!("copied {}", focus.title()).as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_c_in_debug_while_running_asks_before_cancelling() {
+        let (view, state) = rewrite_view(Focus::Debug, vec![Vec::new()], None);
+        let (mut view, clipboard) = with_clipboard(view);
+        start_run(&mut view);
+
+        assert_eq!(
+            view.handle_key(&ctrl_char('c')),
+            Outcome::Continue,
+            "the first Ctrl+C cancelled, or quit"
+        );
+        assert!(view.cancel_armed, "the cancel was not armed");
+        assert!(
+            view.message
+                .as_deref()
+                .is_some_and(|m| m.contains("Ctrl+C")),
+            "the prompt is not actionable: {:?}",
+            view.message
+        );
+        assert_eq!(
+            state.borrow().cancels,
+            0,
+            "the child was killed on one press"
+        );
+        assert_eq!(clipboard.written(), None, "the first press also copied");
+
+        assert_eq!(
+            view.handle_key(&ctrl_char('c')),
+            Outcome::Continue,
+            "the confirming press quit"
+        );
+        assert_eq!(state.borrow().cancels, 1, "the child was not asked to stop");
+        assert!(!view.cancel_armed, "the prompt survived the cancel");
+        // The state word waits for the cancelled outcome to come back through the tick: the
+        // run has been asked to stop, not reaped.
+        assert_eq!(view.state, State::Running);
+        assert_eq!(view.message.as_deref(), Some("cancelling"));
+    }
+
     #[test]
     fn ctrl_v_pastes_into_the_focused_editable_pane_at_the_cursor() {
         let mut view = clipboard_view(Focus::Source, crate::clipboard::Recording::with("pasted"));
@@ -2279,6 +2386,24 @@ mod tests {
             title_row.contains('═'),
             "panel has no border: {title_row:?}"
         );
+    }
+
+    /// Starts a run on a `rewrite_view`'s machine and marks the view as running, so the
+    /// cancel and copy paths can be exercised without repeating the task literal.
+    fn start_run(view: &mut View<'_>) {
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+            transport: crate::harness::Transport::Argv,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
     }
 
     /// A clipboard that always fails, standing in for a machine with no display server.
@@ -2827,33 +2952,54 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_while_running_cancels_instead_of_quitting() {
-        let (mut view, state) = rewrite_view(Focus::Source, vec![Vec::new()], None);
-        let task = crate::harness::Task {
-            instructions: "formal",
-            source_text: "text",
-            model: None,
-            session: None,
-            transport: crate::harness::Transport::Argv,
-        };
-        view.machine
-            .as_mut()
-            .unwrap()
-            .start(&task, true, &mut view.stream, std::time::Instant::now())
-            .unwrap();
-        view.state = State::Running;
+    fn ctrl_c_outside_debug_never_touches_a_live_run() {
+        // The other half of the debug-gated cancel: source/instructions/output must copy and
+        // leave the child alone, even with a run live.
+        for focus in [Focus::Source, Focus::Instructions] {
+            let (view, state) = rewrite_view(focus, vec![Vec::new()], None);
+            let (mut view, clipboard) = with_clipboard(view);
+            view.source = Editor::from_text("the source");
+            view.instructions = Editor::from_text("the instructions");
+            start_run(&mut view);
 
-        assert_eq!(
-            view.handle_key(&ctrl_char('c')),
-            Outcome::Continue,
-            "Ctrl+C quit while a run was live"
+            assert_eq!(
+                view.handle_key(&ctrl_char('c')),
+                Outcome::Continue,
+                "Ctrl+C quit mid-run from {focus:?}"
+            );
+
+            assert_eq!(
+                state.borrow().cancels,
+                0,
+                "the run was cancelled from {focus:?}"
+            );
+            assert!(!view.cancel_armed, "a copy pane armed a cancel");
+            assert_eq!(view.state, State::Running);
+            assert!(
+                clipboard.written().is_some(),
+                "Ctrl+C copied nothing from {focus:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settled_run_disarms_a_pending_cancel() {
+        // A prompt that survived its run would put the next run one keystroke from a kill.
+        let (view, state) = rewrite_view(
+            Focus::Debug,
+            vec![vec![delimited("the rewrite")]],
+            Some(exited(0)),
         );
+        let (mut view, _) = with_clipboard(view);
+        start_run(&mut view);
+        view.handle_key(&ctrl_char('c'));
+        assert!(view.cancel_armed);
 
-        assert_eq!(state.borrow().cancels, 1, "the child was not asked to stop");
-        // The state word waits for the cancelled outcome to come back through the tick: the
-        // run has been asked to stop, not reaped.
-        assert_eq!(view.state, State::Running);
-        assert_eq!(view.message.as_deref(), Some("cancelling"));
+        view.tick();
+
+        assert_eq!(view.state, State::Idle, "the run did not settle");
+        assert!(!view.cancel_armed, "the cancel stayed armed across runs");
+        assert_eq!(state.borrow().cancels, 0);
     }
 
     #[test]
@@ -2891,15 +3037,19 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_when_idle_quits_with_no_prompt() {
-        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
-        assert_eq!(view.state, State::Idle);
-
-        assert_eq!(
-            view.handle_key(&ctrl_char('c')),
-            Outcome::Quit,
-            "Ctrl+C did not quit while idle"
-        );
+    fn ctrl_c_while_idle_is_never_a_quit() {
+        // `Ctrl+Q` is the only quit now, from every focus and every state.
+        for focus in Focus::ALL {
+            let (view, _) = rewrite_view(focus, Vec::new(), None);
+            let (mut view, _) = with_clipboard(view);
+            assert_eq!(view.state, State::Idle);
+            assert_eq!(
+                view.handle_key(&ctrl_char('c')),
+                Outcome::Continue,
+                "Ctrl+C quit while idle in {focus:?}"
+            );
+            assert!(!view.quit_armed, "a Ctrl+C press armed the quit");
+        }
     }
 
     #[test]

@@ -111,12 +111,12 @@ Four panes, all focusable. Two columns, 50/50.
 |---|---|
 | `Ctrl+R` | Rewrite. Starts a session on first use, otherwise resends current source + instructions into the existing session |
 | `Ctrl+N` | New session: drop harness context, clear output and debug, keep source and instructions |
-| `Ctrl+C` | If running: cancel the harness. Otherwise: quit |
-| `Ctrl+Q` | Quit; confirm if a rewrite is running |
+| `Ctrl+C` | Copy the focused pane's text. In the debug pane while a rewrite runs: cancel the harness, after a confirming second press |
+| `Ctrl+Q` | Quit; confirm if a rewrite is running. The only quit key |
 | `Tab` / `Shift+Tab` | Cycle focus |
 | `Ctrl+←` / `Ctrl+→` | Switch column |
 | `Ctrl+↑` / `Ctrl+↓` | Switch row (source ↔ instructions, output ↔ debug); no wrap |
-| `Ctrl+Y` | Copy the focused pane's text to the clipboard |
+| `Ctrl+Y` | Copy the focused pane's text to the clipboard (same as `Ctrl+C` outside a running debug pane) |
 | `Ctrl+V` | Paste the clipboard into the focused pane (editable panes only) |
 | arrow keys | Move cursor (editable) or scroll (read-only) |
 | `PgUp` / `PgDn` | Scroll by a page in the focused pane |
@@ -570,7 +570,9 @@ machine is tested headlessly, with the terminal backend stubbed.
 
 Settled since v0.1: instructions travel in the user turn (§6.0, measured); source text is
 resent on every rewrite (cheap, a few paragraphs); one session per run; nothing is
-persisted; `Esc` does nothing, `Ctrl+Q` quits; output pane = final text only, debug pane
+persisted; `Esc` does nothing, `Ctrl+Q` quits and is the only quit key, `Ctrl+C` copies the
+focused pane and cancels only in the debug pane after a confirming second press, so the key
+keeps its terminal meaning of copy; output pane = final text only, debug pane
 = streaming/reasoning/stderr/app events; output pane cleared on spawn;
 harness binary is checked at startup and missing means a stderr error and non-zero exit;
 tool denial is verified for both harnesses (no file was created in three claude attempts
