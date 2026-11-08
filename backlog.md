@@ -1,7 +1,7 @@
 ## Active
 - [ ] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
 - [ ] Marker extraction and error states #marker-extract <- [pane-routing]
-- [ ] Output pane from final text, debug pane from stream #pane-routing <- [editor-wrap, process-spawn]
+- [>] Output pane from final text, debug pane from stream #pane-routing <- [editor-wrap, process-spawn]
 - [ ] Rewrite validation and state machine #rewrite-flow <- [clipboard, marker-extract]
 - [ ] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
 - [ ] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]

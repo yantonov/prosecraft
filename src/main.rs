@@ -24,6 +24,7 @@ mod cli;
 mod editor;
 mod harness;
 mod layout;
+mod panes;
 mod process;
 mod ui;
 mod wrap;
@@ -60,8 +61,6 @@ struct Tui {
     config: Config,
     /// UI state, not terminal state: the four-pane layout and its focus index.
     focus: Focus,
-    output_scroll: u16,
-    debug_scroll: u16,
 }
 
 impl Tui {
@@ -88,8 +87,6 @@ impl Tui {
             terminal: Terminal::new(CrosstermBackend::new(stdout))?,
             config,
             focus: Focus::Source,
-            output_scroll: 0,
-            debug_scroll: 0,
         })
     }
 
@@ -98,13 +95,9 @@ impl Tui {
             terminal,
             config,
             focus,
-            output_scroll,
-            debug_scroll,
         } = self;
 
         let mut view = ui::View::new(config, *focus);
-        view.output_scroll = *output_scroll;
-        view.debug_scroll = *debug_scroll;
 
         event_loop(
             &mut view,

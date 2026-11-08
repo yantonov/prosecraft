@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 
 use crate::cli::Config;
 use crate::layout::{self, Focus};
+use crate::panes::StreamState;
 
 /// Glyph standing in for the cursor until the editor ticket brings a real one. A block on a
 /// single cell reads as a caret without needing a styled-background pass over the buffer.
@@ -70,10 +71,9 @@ pub struct View<'a> {
     pub focus: Focus,
     pub source: &'a str,
     pub instructions: &'a str,
-    pub output: &'a str,
-    pub debug: &'a str,
-    pub output_scroll: u16,
-    pub debug_scroll: u16,
+    /// Content and scroll state of the output and debug panes (spec §5, §6.1b). Owned here
+    /// rather than borrowed because the stream writes into it while the view is alive.
+    pub stream: StreamState,
     pub state: State,
     /// One-line note beside the state word: validation text, an error, the quit prompt, or
     /// how the last run ended (a cancelled rewrite returns to `Idle` with its note here).
@@ -89,10 +89,7 @@ impl<'a> View<'a> {
             focus,
             source: &config.initial_source,
             instructions: &config.initial_instructions,
-            output: "",
-            debug: "",
-            output_scroll: 0,
-            debug_scroll: 0,
+            stream: StreamState::new(),
             state: State::Idle,
             message: None,
         }
@@ -115,6 +112,32 @@ impl<'a> View<'a> {
         }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             return self.interrupt();
+        }
+        // Scrolling a read-only pane is a view operation, not a movement of the cursor, so it
+        // is handled before focus routing and only for the panes that have an offset.
+        if !self.focus.is_editable() {
+            match (key.code, key.modifiers) {
+                // Spec §4: PgUp/PgDn move by a page in the focused pane.
+                (KeyCode::PageUp, _) => {
+                    self.stream.page(self.focus, -1);
+                    return Outcome::Continue;
+                }
+                (KeyCode::PageDown, _) => {
+                    self.stream.page(self.focus, 1);
+                    return Outcome::Continue;
+                }
+                // The arrow keys scroll rather than move: there is no cursor in a read-only
+                // pane, and a pane that ignored them would look broken.
+                (KeyCode::Up, _) => {
+                    self.stream.scroll(self.focus, -1);
+                    return Outcome::Continue;
+                }
+                (KeyCode::Down, _) => {
+                    self.stream.scroll(self.focus, 1);
+                    return Outcome::Continue;
+                }
+                _ => {}
+            }
         }
         // Esc stays in the fall-through arm on purpose: spec §4 fixes it as "does nothing in
         // v0.1", and a key silently doing something later is harder to notice than a test.
@@ -154,12 +177,13 @@ impl<'a> View<'a> {
         }
     }
 
-    fn content(&self, focus: Focus) -> (&'a str, u16) {
+    /// The editable panes' text. The read-only ones are drawn by [`StreamState`], which owns
+    /// their wrapping and scroll offsets.
+    fn content(&self, focus: Focus) -> &'a str {
         match focus {
-            Focus::Source => (self.source, 0),
-            Focus::Instructions => (self.instructions, 0),
-            Focus::Output => (self.output, self.output_scroll),
-            Focus::Debug => (self.debug, self.debug_scroll),
+            Focus::Source => self.source,
+            Focus::Instructions => self.instructions,
+            Focus::Output | Focus::Debug => "",
         }
     }
 }
@@ -180,28 +204,44 @@ pub fn render(frame: &mut Frame, view: &View) {
 
 fn draw_pane(frame: &mut Frame, view: &View, panes: &layout::Panes, focus: Focus, area: Rect) {
     let focused = focus == view.focus;
+    // The debug pane says so when it has stopped following the stream, so a scrolled pane
+    // cannot look frozen (spec §6.1b). The output pane has nothing to follow and never says
+    // it.
+    let suffix = match focus {
+        Focus::Debug => view.stream.debug_suffix(),
+        Focus::Output => view.stream.output_suffix(),
+        Focus::Source | Focus::Instructions => None,
+    };
+    let mut title = focus.title().to_owned();
+    if let Some(suffix) = suffix {
+        title.push_str(" — ");
+        title.push_str(suffix);
+    }
     let block = Block::bordered()
         .border_type(border_type(focus, focused))
         .border_style(border_style(focused))
-        .title(focus.title());
+        .title(title);
 
-    let (text, scroll) = view.content(focus);
-    // `Wrap` is what makes text soft-wrap instead of truncate; the widths it uses are the
-    // pane's own, so each pane wraps at the width this layout gave it. Scroll is applied as
-    // a row offset: the setup for the scrolling keys the pane-routing ticket adds.
-    let content = if focused && focus.is_editable() {
-        with_cursor(text)
-    } else {
-        text.to_owned()
-    };
     // The block and the text are rendered separately so the text is laid out in exactly
-    // `panes.inner(focus)`: that rectangle is the width the wrap ticket will wrap to, and
-    // taking it from one place keeps the two from disagreeing.
+    // `panes.inner(focus)`: that rectangle is the width the wrap ticket wraps to, and taking
+    // it from one place keeps the two from disagreeing.
     frame.render_widget(block, area);
-    let paragraph = Paragraph::new(content)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    frame.render_widget(paragraph, panes.inner(focus));
+    if focus.is_editable() {
+        // `Wrap` is what makes text soft-wrap instead of truncate; the widths it uses are the
+        // pane's own, so each pane wraps at the width this layout gave it.
+        let text = view.content(focus);
+        let content = if focused {
+            with_cursor(text)
+        } else {
+            text.to_owned()
+        };
+        let paragraph = Paragraph::new(content).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, panes.inner(focus));
+    } else {
+        // Read-only panes own their wrapping and their offset: `StreamState` is what keeps a
+        // page a screenful and the auto-tail honest.
+        view.stream.render(focus, frame, panes.inner(focus));
+    }
 }
 
 /// Read-only panes are identified by their border, so the focused one switches to a doubled
@@ -550,69 +590,6 @@ mod tests {
     }
 
     #[test]
-    fn scroll_offsets_pane_content_without_touching_the_other_pane() {
-        let config = config();
-        let lines = (0..20)
-            .map(|n| format!("line{n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut view = View::new(&config, Focus::Debug);
-        view.output = &lines;
-        view.debug = &lines;
-
-        let top = draw_at(&view, 80, 24);
-        view.output_scroll = 3;
-        let scrolled = draw_at(&view, 80, 24);
-
-        let panes = layout::panes(Rect::new(0, 0, 80, 24));
-        let output_row = row(&top, panes.output.y + 1);
-        assert!(
-            output_row.contains("line0"),
-            "output did not start at 0: {output_row:?}"
-        );
-
-        let output_row = row(&scrolled, panes.output.y + 1);
-        assert!(
-            output_row.contains("line3"),
-            "output scroll ignored: {output_row:?}"
-        );
-
-        // The debug pane has its own offset and must be unaffected by the output one.
-        let debug_row = row(&scrolled, panes.debug.y + 1);
-        assert!(
-            debug_row.contains("line0"),
-            "debug pane scrolled with output: {debug_row:?}"
-        );
-    }
-
-    #[test]
-    fn debug_scroll_offset_is_independent_of_the_output_offset() {
-        let config = config();
-        let lines = (0..20)
-            .map(|n| format!("line{n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut view = View::new(&config, Focus::Debug);
-        view.output = &lines;
-        view.debug = &lines;
-        view.debug_scroll = 2;
-
-        let buffer = draw_at(&view, 80, 24);
-        let panes = layout::panes(Rect::new(0, 0, 80, 24));
-
-        let debug_row = row(&buffer, panes.debug.y + 1);
-        assert!(
-            debug_row.contains("line2"),
-            "debug scroll ignored: {debug_row:?}"
-        );
-        let output_row = row(&buffer, panes.output.y + 1);
-        assert!(
-            output_row.contains("line0"),
-            "output pane scrolled with debug: {output_row:?}"
-        );
-    }
-
-    #[test]
     fn long_text_wraps_inside_the_pane_instead_of_truncating() {
         // Inner width is 18 at 40x10, so this line must occupy several rows and keep its
         // last word. Truncation would drop the tail, which is what the spec forbids.
@@ -931,6 +908,86 @@ mod tests {
         (0..buffer.area.height).any(|y| row(buffer, y).contains(needle))
     }
 
+    /// A view with a full debug pane, a known viewport, and the given focus. The viewport is
+    /// established by a draw, because a paging key uses the geometry of the last frame.
+    fn scrolling_view(focus: Focus) -> View<'static> {
+        let config = Box::leak(Box::new(config()));
+        let mut view = View::new(config, focus);
+        for n in 0..60 {
+            view.stream.app(format!("line{n}"));
+        }
+        let _ = draw_at(&view, 80, 24);
+        view
+    }
+
+    #[test]
+    fn pgup_and_pgdn_scroll_a_focused_read_only_pane() {
+        let mut view = scrolling_view(Focus::Debug);
+        assert_eq!(
+            view.stream.debug_suffix(),
+            None,
+            "the pane should start tailing"
+        );
+
+        // Spec §4: PgUp scrolls by a page in the focused pane, and the pane then says it is
+        // no longer following the stream.
+        assert_eq!(
+            view.handle_key(&KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            Outcome::Continue
+        );
+        assert_eq!(view.stream.debug_suffix(), Some("not tailing"));
+
+        // PgDn brings it back to the bottom, which resumes tailing.
+        assert_eq!(
+            view.handle_key(&KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            Outcome::Continue
+        );
+        assert_eq!(view.stream.debug_suffix(), None);
+    }
+
+    #[test]
+    fn arrows_scroll_a_read_only_pane_instead_of_moving_a_cursor() {
+        let mut view = scrolling_view(Focus::Output);
+        let output = view.stream.output_text();
+
+        // An arrow key must not quit, must not change focus, and must not edit anything.
+        for code in [KeyCode::Up, KeyCode::Down] {
+            assert_eq!(
+                view.handle_key(&KeyEvent::new(code, KeyModifiers::NONE)),
+                Outcome::Continue,
+                "{code:?} quit"
+            );
+        }
+        assert_eq!(view.focus, Focus::Output, "an arrow moved focus");
+        assert_eq!(view.stream.output_text(), output, "an arrow edited a pane");
+    }
+
+    #[test]
+    fn scrolling_keys_do_not_disturb_an_editable_pane() {
+        for focus in [Focus::Source, Focus::Instructions] {
+            let mut view = scrolling_view(focus);
+            // A draw establishes the read-only viewports; the editable pane has none, so
+            // these keys fall through to focus handling and must change nothing.
+            for code in [
+                KeyCode::PageUp,
+                KeyCode::PageDown,
+                KeyCode::Up,
+                KeyCode::Down,
+            ] {
+                assert_eq!(
+                    view.handle_key(&KeyEvent::new(code, KeyModifiers::NONE)),
+                    Outcome::Continue
+                );
+            }
+            assert_eq!(view.focus, focus, "{focus:?} moved");
+            assert_eq!(
+                view.stream.debug_suffix(),
+                None,
+                "{focus:?} scrolled the debug pane"
+            );
+        }
+    }
+
     fn focus_after(key: KeyEvent, from: Focus) -> Focus {
         let config = config();
         let mut view = View::new(&config, from);
@@ -1025,6 +1082,32 @@ mod tests {
             KeyEvent::new_with_kind(KeyCode::Tab, KeyModifiers::NONE, KeyEventKind::Release);
 
         assert_eq!(focus_after(release, Focus::Source), Focus::Source);
+    }
+
+    #[test]
+    fn the_not_tailing_marker_is_drawn_in_the_debug_pane_title() {
+        let mut view = scrolling_view(Focus::Debug);
+        drawn_title(&view);
+        // Read the title off a real frame rather than the accessor, so the marker is proved
+        // to reach the screen and not just the state.
+        assert!(
+            !drawn_title(&view).contains("not tailing"),
+            "a tailing pane drew the marker"
+        );
+
+        view.handle_key(&KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        let title = drawn_title(&view);
+        assert!(
+            title.contains("not tailing"),
+            "a scrolled pane did not draw the marker: {title:?}"
+        );
+    }
+
+    /// The debug pane's title as it appears in a drawn frame.
+    fn drawn_title(view: &View) -> String {
+        let buffer = draw_at(view, 80, 24);
+        let panes = layout::panes(Rect::new(0, 0, 80, 24));
+        title_at(&buffer, panes.debug)
     }
 
     #[test]
