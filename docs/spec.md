@@ -127,6 +127,7 @@ Four panes, all focusable. Two columns, 50/50.
 | `Shift+←` / `Shift+→` | Switch column; same as `Ctrl+←` / `Ctrl+→` |
 | `Shift+↑` / `Shift+↓` | Switch row; same as `Ctrl+↑` / `Ctrl+↓` |
 | `Ctrl+V` | Paste the clipboard into the focused pane (editable panes only) |
+| `Ctrl+K` | Clear the focused pane (editable panes only) |
 | arrow keys | Move cursor (editable) or scroll (read-only) |
 | `PgUp` / `PgDn` | Scroll by a page in the focused pane |
 | `F1` | Toggle the key-bindings help panel. Any key closes it; the key that closes it does nothing else |

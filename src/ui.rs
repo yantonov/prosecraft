@@ -227,15 +227,20 @@ impl<'a> View<'a> {
                 _ => {}
             }
         }
-        // The clipboard keys (spec §4). `Ctrl+V` is cursor-relative and respects focus, which
-        // is the whole of the paste surface: pasting into a focused source pane replaces what
-        // is there, so no whole-pane replace key is needed alongside it. `Ctrl+C` is the copy
-        // key and is handled above with the other chords, because a run in the debug pane
-        // gives it a second meaning.
+        // The clipboard and pane-editing keys (spec §4). `Ctrl+V` is cursor-relative and
+        // respects focus, which is the whole of the paste surface: pasting into a focused source
+        // pane replaces what is there, so no whole-pane replace key is needed alongside it.
+        // `Ctrl+C` is the copy key and is handled above with the other chords, because a run in
+        // the debug pane gives it a second meaning. `Ctrl+K` clears, the one editing action a
+        // pane cannot do today without holding Backspace.
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
                 KeyCode::Char('v') => {
                     self.paste();
+                    return Outcome::Continue;
+                }
+                KeyCode::Char('k') => {
+                    self.clear();
                     return Outcome::Continue;
                 }
                 KeyCode::Char('r') => {
@@ -496,10 +501,8 @@ impl<'a> View<'a> {
     /// A read-only pane has no cursor to insert at, so the paste is refused with a toast rather
     /// than silently ignored: the user pressed a key and deserves to know why nothing happened.
     fn paste(&mut self) {
-        if !self.focus.is_editable() {
-            // Spec §4: `Ctrl+V` is editable-panes-only. The toast is the whole UI for this,
-            // deliberately not a modal framework for one case.
-            self.toast = Some(format!("{} is read-only", self.focus.title()));
+        if let Err(toast) = self.require_editable() {
+            self.toast = Some(toast);
             return;
         }
         match self.clipboard.get_text() {
@@ -516,6 +519,39 @@ impl<'a> View<'a> {
             Ok(_) => self.message = Some("clipboard is empty".to_owned()),
             Err(err) => self.message = Some(failure(&err)),
         }
+    }
+
+    /// `Ctrl+K`: clear the focused pane (spec §4).
+    ///
+    /// There is no undo (§2), so this key exists because the other way to empty a pane is to
+    /// hold Backspace. The clipboard is where the text goes back from: `Ctrl+K` then `Ctrl+V`
+    /// is the recovery the user has.
+    ///
+    /// The wrap state is replaced along with the buffer: it holds a scroll offset and the last
+    /// draw's width, and a fresh empty buffer makes both meaningless.
+    fn clear(&mut self) {
+        if let Err(toast) = self.require_editable() {
+            self.toast = Some(toast);
+            return;
+        }
+        if let Some((editor, wrap)) = self.editable(self.focus) {
+            *editor = Editor::new();
+            *wrap = WrapState::new();
+        }
+        self.message = Some(format!("cleared {}", self.focus.title()));
+    }
+
+    /// The editable-panes-only guard behind `Ctrl+V` and `Ctrl+K` (spec §4).
+    ///
+    /// One helper rather than two copies of the test, so the two keys cannot drift into
+    /// disagreeing about which panes they work in. Returns the toast to show when the key was
+    /// refused, or `Ok(())` when the focused pane can be edited.
+    fn require_editable(&self) -> Result<(), String> {
+        if self.focus.is_editable() {
+            return Ok(());
+        }
+        // The toast is the whole UI for this, deliberately not a modal framework for one case.
+        Err(format!("{} is read-only", self.focus.title()))
     }
 
     /// `Ctrl+C` in every pane but a running debug one: copy the focused pane's text.
@@ -603,7 +639,7 @@ fn draw_toast(frame: &mut Frame, text: &str, area: Rect) {
 /// table, because this list is that table's only on-screen copy: a binding that is added there
 /// and forgotten here would be invisible to the user. The arrows are the spec's own glyphs, and
 /// they are also the widest cell in the column.
-const HELP_ROWS: [(&str, &str); 12] = [
+const HELP_ROWS: [(&str, &str); 13] = [
     ("Ctrl+R", "rewrite, or resend into the same session"),
     (
         "Ctrl+N",
@@ -622,6 +658,7 @@ const HELP_ROWS: [(&str, &str); 12] = [
     ("Ctrl+↑ / ↓", "switch row; no wrap"),
     ("Shift+arrows", "same as Ctrl+arrows"),
     ("Ctrl+V", "paste into an editable pane"),
+    ("Ctrl+K", "clear the focused editable pane"),
     ("arrows", "move the cursor, or scroll"),
     ("PgUp / PgDn", "scroll by a page"),
     ("F1 / any key", "close this panel"),
@@ -2270,6 +2307,80 @@ mod tests {
             assert_eq!(view.focus, focus, "the refusal moved focus");
             assert_eq!(view.stream.output_text(), before_output);
             assert_eq!(view.stream.debug_text(), before_debug);
+        }
+    }
+
+    #[test]
+    fn ctrl_k_clears_the_focused_editable_pane() {
+        for focus in [Focus::Source, Focus::Instructions] {
+            let mut view = editing_view(focus, "first\nsecond");
+            view.source = Editor::from_text("source text");
+            view.instructions = Editor::from_text("instructions text");
+            view.source.set_cursor(0, 3);
+
+            view.handle_key(&ctrl_char('k'));
+
+            let cleared = match focus {
+                Focus::Source => &view.source,
+                _ => &view.instructions,
+            };
+            let kept = match focus {
+                Focus::Source => &view.instructions,
+                _ => &view.source,
+            };
+            assert_eq!(cleared.text(), "", "{focus:?} was not cleared");
+            // A fresh buffer is one empty line with the cursor at the origin, or the cursor
+            // would sit past the end of text nobody can see.
+            assert_eq!(cleared.lines().len(), 1, "{focus:?} kept lines");
+            assert_eq!(
+                cleared.cursor(),
+                crate::editor::Cursor::new(0, 0),
+                "{focus:?} kept a cursor"
+            );
+            assert!(!kept.text().is_empty(), "{focus:?} cleared its neighbour");
+            assert_eq!(view.focus, focus, "the clear moved focus");
+        }
+    }
+
+    #[test]
+    fn ctrl_k_in_a_read_only_pane_is_refused_with_a_toast() {
+        for focus in [Focus::Output, Focus::Debug] {
+            let mut view = editing_view(focus, "source text");
+            let before_output = view.stream.output_text();
+            let before_debug = view.stream.debug_text();
+
+            view.handle_key(&ctrl_char('k'));
+
+            let toast = view.toast.as_deref().expect("no refusal shown");
+            assert!(
+                toast.contains("read-only"),
+                "the toast should say why: {toast}"
+            );
+            // Neither read-only pane has an editor, so the source pane is the witness that
+            // nothing anywhere was wiped.
+            assert_eq!(view.source.text(), "source text", "the source was cleared");
+            assert_eq!(view.stream.output_text(), before_output);
+            assert_eq!(view.stream.debug_text(), before_debug);
+            assert_eq!(view.focus, focus, "the refusal moved focus");
+        }
+    }
+
+    #[test]
+    fn ctrl_k_is_a_binding_and_not_a_typed_character() {
+        // A `Ctrl` chord must never reach the editor as text, and an unbound chord must be
+        // inert: the pane and the cursor stay exactly where they were.
+        for focus in Focus::ALL {
+            let mut view = editing_view(focus, "text");
+            view.handle_key(&ctrl_char('j'));
+
+            assert_eq!(view.source.text(), "text", "Ctrl+J typed at {focus:?}");
+            assert_eq!(
+                view.instructions.text(),
+                "text",
+                "Ctrl+J typed at {focus:?}"
+            );
+            assert_eq!(view.focus, focus, "Ctrl+J moved focus from {focus:?}");
+            assert!(view.toast.is_none(), "Ctrl+J raised a toast at {focus:?}");
         }
     }
 
