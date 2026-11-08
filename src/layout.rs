@@ -75,6 +75,20 @@ impl Focus {
         }
     }
 
+    /// `Ctrl+Up`/`Ctrl+Down`: the other row at the same column. Deliberately without a wrap:
+    /// the row keys are an address, and a `Ctrl+Up` on a top pane that jumped to the bottom
+    /// one would make them a second, confusing way to cycle focus.
+    pub fn switch_row(self, down: bool) -> Self {
+        match (self, down) {
+            (Self::Source, true) => Self::Instructions,
+            (Self::Output, true) => Self::Debug,
+            (Self::Instructions, false) => Self::Source,
+            (Self::Debug, false) => Self::Output,
+            // Already in the requested row: nothing above or below to move to.
+            (other, _) => other,
+        }
+    }
+
     /// Spec §4 table: only the left column takes text.
     pub fn is_editable(self) -> bool {
         matches!(self, Self::Source | Self::Instructions)
@@ -248,6 +262,72 @@ mod tests {
     fn switch_column_is_its_own_inverse_for_every_pane() {
         for focus in Focus::ALL {
             assert_eq!(focus.switch_column().switch_column(), focus);
+        }
+    }
+
+    #[test]
+    fn switch_row_moves_down_then_up_within_one_column() {
+        // The mapping the ticket names, spelled out so it cannot agree with a broken helper.
+        assert_eq!(Focus::Source.switch_row(true), Focus::Instructions);
+        assert_eq!(Focus::Output.switch_row(true), Focus::Debug);
+        assert_eq!(Focus::Instructions.switch_row(false), Focus::Source);
+        assert_eq!(Focus::Debug.switch_row(false), Focus::Output);
+    }
+
+    #[test]
+    fn switch_row_never_wraps() {
+        // An address, not a cycle: pressing the key again at the edge stays put instead of
+        // jumping to the far side of the column.
+        for (from, down) in [(Focus::Source, false), (Focus::Output, false)] {
+            assert_eq!(from.switch_row(down), from, "{from:?} wrapped upward");
+        }
+        for (from, down) in [(Focus::Instructions, true), (Focus::Debug, true)] {
+            assert_eq!(from.switch_row(down), from, "{from:?} wrapped downward");
+        }
+    }
+
+    #[test]
+    fn switch_row_changes_the_row_but_not_the_column() {
+        // Same shape as the column test: 0 is the top row, 1 the bottom one.
+        fn row(focus: Focus) -> usize {
+            match focus {
+                Focus::Source | Focus::Output => 0,
+                Focus::Instructions | Focus::Debug => 1,
+            }
+        }
+
+        // Only the directions that can move are asserted: at the edge the key stays put by
+        // design (see `switch_row_never_wraps`), so `switch_row` there is the identity.
+        for (focus, down) in [
+            (Focus::Source, true),
+            (Focus::Output, true),
+            (Focus::Instructions, false),
+            (Focus::Debug, false),
+        ] {
+            let other = focus.switch_row(down);
+            assert_ne!(
+                row(focus),
+                row(other),
+                "{focus:?} -> {other:?} kept its row"
+            );
+            assert_eq!(
+                focus.is_editable(),
+                other.is_editable(),
+                "{focus:?} -> {other:?} crossed columns"
+            );
+        }
+    }
+
+    #[test]
+    fn row_and_column_keys_commute() {
+        // Address, not history: crossing a column and then a row must land on the diagonally
+        // opposite pane whichever order the keys are pressed in.
+        for focus in Focus::ALL {
+            for down in [true, false] {
+                let row_first = focus.switch_row(down).switch_column();
+                let column_first = focus.switch_column().switch_row(down);
+                assert_eq!(row_first, column_first, "{focus:?}, down={down}");
+            }
         }
     }
 

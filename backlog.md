@@ -23,6 +23,7 @@
 - [x] Resolve where raw text goes when a marker is missing #spec-marker-fallback
 - [x] lzmlv #lzmlv
 - [x] jcfm2 #jcfm2
+- [x] o52bx #o52bx
 - [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]

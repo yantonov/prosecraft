@@ -168,6 +168,23 @@ impl<'a> View<'a> {
             self.toast = None;
             return Outcome::Continue;
         }
+        // Ctrl+Up/Down move focus between the rows of one column. They are handled here, not
+        // in the arrow arms below, because those match `Up`/`Down` whatever the modifiers are:
+        // an editable pane would treat Ctrl+Down as a cursor move and a read-only one as a
+        // scroll, so the key would never reach focus routing.
+        if key.modifiers == KeyModifiers::CONTROL {
+            match key.code {
+                KeyCode::Up => {
+                    self.focus = self.focus.switch_row(false);
+                    return Outcome::Continue;
+                }
+                KeyCode::Down => {
+                    self.focus = self.focus.switch_row(true);
+                    return Outcome::Continue;
+                }
+                _ => {}
+            }
+        }
         // The clipboard keys (spec §4). Distinct on purpose: Ctrl+V is cursor-relative and
         // respects focus, Ctrl+E is a whole-pane replace that always targets source.
         if key.modifiers == KeyModifiers::CONTROL {
@@ -260,8 +277,8 @@ impl<'a> View<'a> {
     }
 
     /// The §4 focus keys: `Tab`/`Shift+Tab` in reading order, `Ctrl+Left`/`Ctrl+Right` across
-    /// columns. Every other key is ignored here, so an unhandled key does nothing rather than
-    /// something surprising.
+    /// columns, `Ctrl+Up`/`Ctrl+Down` across rows. Every other key is ignored here, so an
+    /// unhandled key does nothing rather than something surprising.
     ///
     /// Esc is in the fall-through arm on purpose: spec §4 fixes it as "does nothing in v0.1",
     /// and a key that silently starts doing something later is harder to notice than a test.
@@ -1491,6 +1508,84 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_up_and_down_step_within_a_column() {
+        // Spelled out, because this is the pair the ticket names: down goes to the bottom
+        // pane of the same column, up comes back.
+        assert_eq!(
+            focus_after(ctrl(KeyCode::Down), Focus::Source),
+            Focus::Instructions
+        );
+        assert_eq!(
+            focus_after(ctrl(KeyCode::Down), Focus::Output),
+            Focus::Debug
+        );
+        assert_eq!(
+            focus_after(ctrl(KeyCode::Up), Focus::Instructions),
+            Focus::Source
+        );
+        assert_eq!(focus_after(ctrl(KeyCode::Up), Focus::Debug), Focus::Output);
+    }
+
+    #[test]
+    fn ctrl_up_and_down_never_wrap_to_the_other_end_of_the_column() {
+        for (from, code) in [
+            (Focus::Source, KeyCode::Up),
+            (Focus::Output, KeyCode::Up),
+            (Focus::Instructions, KeyCode::Down),
+            (Focus::Debug, KeyCode::Down),
+        ] {
+            assert_eq!(
+                focus_after(ctrl(code), from),
+                from,
+                "Ctrl+{code:?} from {from:?} wrapped"
+            );
+        }
+    }
+
+    /// The row chords are focus only: they must not be eaten as cursor movement or scrolling,
+    /// which is what the plain arrows do.
+    #[test]
+    fn ctrl_up_and_down_do_not_edit_or_scroll_the_pane_they_leave() {
+        // Editable side: Ctrl+Down must move focus out of source without moving its cursor.
+        let mut view = editing_view(Focus::Source, "ab");
+        view.handle_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let cursor = view.source.cursor();
+
+        view.handle_key(&ctrl(KeyCode::Down));
+
+        assert_eq!(
+            view.focus,
+            Focus::Instructions,
+            "Ctrl+Down did not move focus"
+        );
+        assert_eq!(view.source.cursor(), cursor, "Ctrl+Down moved the cursor");
+        assert_eq!(view.source.text(), "ab", "Ctrl+Down edited the pane");
+
+        // Read-only side: Ctrl+Up must not scroll debug the way a plain Up does. The plain Up
+        // comes first, so the test cannot pass just because scrolling is broken.
+        let mut debug = scrolling_view(Focus::Debug);
+        debug.handle_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let offset = debug.stream.debug_suffix();
+        assert!(
+            offset.is_some(),
+            "a plain Up did not scroll the pane, so this proves nothing"
+        );
+
+        debug.handle_key(&ctrl(KeyCode::Up));
+
+        assert_eq!(
+            debug.focus,
+            Focus::Output,
+            "Ctrl+Up did not move up within the right column"
+        );
+        assert_eq!(
+            debug.stream.debug_suffix(),
+            offset,
+            "Ctrl+Up scrolled the pane instead of moving focus"
+        );
     }
 
     #[test]

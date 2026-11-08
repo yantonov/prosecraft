@@ -88,7 +88,9 @@ Four panes, all focusable. Two columns, 50/50.
 | debug | no | streamed text, reasoning, stderr, app events |
 
 - Focus is a single index over the four panes; `Tab` / `Shift+Tab` cycles forward and back
-  in reading order. `Ctrl+Left` / `Ctrl+Right` jump to the other column, preserving row.
+  in reading order. `Ctrl+Left` / `Ctrl+Right` jump to the other column, preserving row;
+  `Ctrl+Up` / `Ctrl+Down` jump to the other row, preserving column, and do not wrap at the
+  edge.
 - The focused pane shows a cursor (editable) or a highlighted border (read-only), and
   scrolls to keep the cursor/offset in view.
 - `output` and `debug` keep their own scroll offsets. The `debug` pane auto-tails while the
@@ -111,6 +113,7 @@ Four panes, all focusable. Two columns, 50/50.
 | `Ctrl+Q` | Quit; confirm if a rewrite is running |
 | `Tab` / `Shift+Tab` | Cycle focus |
 | `Ctrl+←` / `Ctrl+→` | Switch column |
+| `Ctrl+↑` / `Ctrl+↓` | Switch row (source ↔ instructions, output ↔ debug); no wrap |
 | `Ctrl+Y` | Copy the focused pane's text to the clipboard |
 | `Ctrl+V` | Paste the clipboard into the focused pane (editable panes only) |
 | `Ctrl+E` | Load the clipboard into the source pane, replacing it |
