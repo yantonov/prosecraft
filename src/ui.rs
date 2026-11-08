@@ -202,11 +202,14 @@ impl<'a> View<'a> {
         if ctrl_c {
             return self.interrupt();
         }
-        // Ctrl+Up/Down move focus between the rows of one column. They are handled here, not
-        // in the arrow arms below, because those match `Up`/`Down` whatever the modifiers are:
-        // an editable pane would treat Ctrl+Down as a cursor move and a read-only one as a
-        // scroll, so the key would never reach focus routing.
-        if key.modifiers == KeyModifiers::CONTROL {
+        // Ctrl+arrows and Shift+arrows move focus (spec §4): Left/Right across the columns,
+        // Up/Down within one. They are handled here, not in the arrow arms below, because those
+        // match `Up`/`Down` whatever the modifiers are: an editable pane would treat the chord
+        // as a cursor move and a read-only one as a scroll, so the key would never reach focus
+        // routing. Handling them here also keeps `SHIFT` out of the editor's guard below, where
+        // it would stop a terminal that spells an uppercase letter as `Char('A')`+`SHIFT` from
+        // typing at all.
+        if key.modifiers == KeyModifiers::CONTROL || key.modifiers == KeyModifiers::SHIFT {
             match key.code {
                 KeyCode::Up => {
                     self.focus = self.focus.switch_row(false);
@@ -214,6 +217,11 @@ impl<'a> View<'a> {
                 }
                 KeyCode::Down => {
                     self.focus = self.focus.switch_row(true);
+                    return Outcome::Continue;
+                }
+                // Left and Right are one action: both cross to the other column.
+                KeyCode::Left | KeyCode::Right => {
+                    self.focus = self.focus.switch_column();
                     return Outcome::Continue;
                 }
                 _ => {}
@@ -244,7 +252,8 @@ impl<'a> View<'a> {
         // Editing and moving in an editable pane come before focus routing, because the same
         // key means different things either side of it: Tab changes focus, a character types.
         // Ctrl chords are excluded here and left to the arms below, so Ctrl+Left still jumps
-        // columns instead of moving within the line.
+        // columns instead of moving within the line. Shift is not excluded: a terminal may
+        // report an uppercase letter as a shifted character key.
         if self.focus.is_editable() && !key.modifiers.contains(KeyModifiers::CONTROL) {
             // The width the wrap layer needs is the one the last draw used, which is why every
             // text operation takes `width` from the cached viewport rather than guessing.
@@ -305,9 +314,10 @@ impl<'a> View<'a> {
         self.route_focus(key)
     }
 
-    /// The §4 focus keys: `Tab`/`Shift+Tab` in reading order, `Ctrl+Left`/`Ctrl+Right` across
-    /// columns, `Ctrl+Up`/`Ctrl+Down` across rows. Every other key is ignored here, so an
-    /// unhandled key does nothing rather than something surprising.
+    /// The §4 focus keys that are left after the chord block: `Tab`/`Shift+Tab` in reading
+    /// order. The arrows never arrive here — they are chords, handled before the editor and the
+    /// scrollers. Every other key is ignored, so an unhandled key does nothing rather than
+    /// something surprising.
     ///
     /// Esc is in the fall-through arm on purpose: spec §4 fixes it as "does nothing in v0.1",
     /// and a key that silently starts doing something later is harder to notice than a test.
@@ -316,10 +326,6 @@ impl<'a> View<'a> {
             // Terminals disagree on how Shift+Tab arrives, so both spellings are accepted.
             (KeyCode::Tab, KeyModifiers::SHIFT) | (KeyCode::BackTab, _) => self.focus.prev(),
             (KeyCode::Tab, _) => self.focus.next(),
-            // Ctrl+Left and Ctrl+Right are one action: both cross to the other column.
-            (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Right, KeyModifiers::CONTROL) => {
-                self.focus.switch_column()
-            }
             _ => self.focus,
         };
         Outcome::Continue
@@ -597,7 +603,7 @@ fn draw_toast(frame: &mut Frame, text: &str, area: Rect) {
 /// table, because this list is that table's only on-screen copy: a binding that is added there
 /// and forgotten here would be invisible to the user. The arrows are the spec's own glyphs, and
 /// they are also the widest cell in the column.
-const HELP_ROWS: [(&str, &str); 11] = [
+const HELP_ROWS: [(&str, &str); 12] = [
     ("Ctrl+R", "rewrite, or resend into the same session"),
     (
         "Ctrl+N",
@@ -614,6 +620,7 @@ const HELP_ROWS: [(&str, &str); 11] = [
     ("Tab / Shift+Tab", "cycle focus"),
     ("Ctrl+← / →", "switch column"),
     ("Ctrl+↑ / ↓", "switch row; no wrap"),
+    ("Shift+arrows", "same as Ctrl+arrows"),
     ("Ctrl+V", "paste into an editable pane"),
     ("arrows", "move the cursor, or scroll"),
     ("PgUp / PgDn", "scroll by a page"),
@@ -1629,6 +1636,106 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn shift(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn shift_arrows_do_exactly_what_ctrl_arrows_do() {
+        for from in Focus::ALL {
+            for code in [KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down] {
+                let expected = focus_after(ctrl(code), from);
+                let got = focus_after(shift(code), from);
+                assert_eq!(got, expected, "Shift+{code:?} diverged from Ctrl+{code:?}");
+            }
+        }
+
+        // Spelled out, because this is the mapping the spec names: the aliases reach the same
+        // three neighbours a Ctrl chord does.
+        assert_eq!(
+            focus_after(shift(KeyCode::Right), Focus::Source),
+            Focus::Output
+        );
+        assert_eq!(
+            focus_after(shift(KeyCode::Left), Focus::Output),
+            Focus::Source
+        );
+        assert_eq!(
+            focus_after(shift(KeyCode::Down), Focus::Source),
+            Focus::Instructions
+        );
+        assert_eq!(focus_after(shift(KeyCode::Up), Focus::Debug), Focus::Output);
+    }
+
+    #[test]
+    fn shift_up_and_down_never_wrap_to_the_other_end_of_the_column() {
+        for (from, code) in [
+            (Focus::Source, KeyCode::Up),
+            (Focus::Output, KeyCode::Up),
+            (Focus::Instructions, KeyCode::Down),
+            (Focus::Debug, KeyCode::Down),
+        ] {
+            assert_eq!(
+                focus_after(shift(code), from),
+                from,
+                "Shift+{code:?} from {from:?} wrapped"
+            );
+        }
+    }
+
+    /// The Shift aliases are focus only, like their Ctrl twins: neither side of the pane may
+    /// eat them as a cursor move or a scroll.
+    #[test]
+    fn shift_up_and_down_do_not_edit_or_scroll_the_pane_they_leave() {
+        let mut view = editing_view(Focus::Source, "ab");
+        view.handle_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let cursor = view.source.cursor();
+
+        view.handle_key(&shift(KeyCode::Down));
+
+        assert_eq!(
+            view.focus,
+            Focus::Instructions,
+            "Shift+Down did not move focus"
+        );
+        assert_eq!(view.source.cursor(), cursor, "Shift+Down moved the cursor");
+        assert_eq!(view.source.text(), "ab", "Shift+Down edited the pane");
+
+        let mut debug = scrolling_view(Focus::Debug);
+        debug.handle_key(&shift(KeyCode::Up));
+
+        assert_eq!(
+            debug.focus,
+            Focus::Output,
+            "Shift+Up did not move up within the right column"
+        );
+        assert_eq!(
+            debug.stream.debug_suffix(),
+            None,
+            "Shift+Up scrolled the pane instead of moving focus"
+        );
+    }
+
+    #[test]
+    fn shift_left_and_right_do_not_move_the_cursor_in_an_editable_pane() {
+        let mut view = editing_view(Focus::Source, "ab");
+        view.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let cursor = view.source.cursor();
+
+        view.handle_key(&shift(KeyCode::Right));
+
+        assert_eq!(
+            view.focus,
+            Focus::Output,
+            "Shift+Right did not switch column"
+        );
+        assert_eq!(
+            view.source.cursor(),
+            cursor,
+            "Shift+Right moved the cursor as well"
+        );
     }
 
     #[test]

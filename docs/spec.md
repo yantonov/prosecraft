@@ -90,7 +90,9 @@ Four panes, all focusable. Two columns, 50/50.
 - Focus is a single index over the four panes; `Tab` / `Shift+Tab` cycles forward and back
   in reading order. `Ctrl+Left` / `Ctrl+Right` jump to the other column, preserving row;
   `Ctrl+Up` / `Ctrl+Down` jump to the other row, preserving column, and do not wrap at the
-  edge.
+  edge. The same four moves are also bound to `Shift+Left` / `Shift+Right` and
+  `Shift+Up` / `Shift+Down`, so neighbouring panes are reachable without a hand on the
+  control key; the two bindings are aliases and never differ in behaviour.
 - A `Ctrl+R` that starts a rewrite sets focus to the `output` pane. Asking for a rewrite is
   the end of typing: the next thing the user does is read the result, and the pane that will
   hold it is where they are looking. The debug pane stays one `Ctrl+Up` away, which is what
@@ -122,6 +124,8 @@ Four panes, all focusable. Two columns, 50/50.
 | `Tab` / `Shift+Tab` | Cycle focus |
 | `Ctrl+←` / `Ctrl+→` | Switch column |
 | `Ctrl+↑` / `Ctrl+↓` | Switch row (source ↔ instructions, output ↔ debug); no wrap |
+| `Shift+←` / `Shift+→` | Switch column; same as `Ctrl+←` / `Ctrl+→` |
+| `Shift+↑` / `Shift+↓` | Switch row; same as `Ctrl+↑` / `Ctrl+↓` |
 | `Ctrl+V` | Paste the clipboard into the focused pane (editable panes only) |
 | arrow keys | Move cursor (editable) or scroll (read-only) |
 | `PgUp` / `PgDn` | Scroll by a page in the focused pane |

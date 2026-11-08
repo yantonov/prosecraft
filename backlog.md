@@ -31,6 +31,7 @@
 - [x] Drop Ctrl+Y: Ctrl+C is the only copy key #nxm5v
 - [x] Status line drops the Tab hint #usfvji
 - [x] Ctrl+R puts focus on the output pane #srx6o7
+- [x] Bind focus moves to Shift+arrows as well as Ctrl+arrows #shift-arrows-focus
 - [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
