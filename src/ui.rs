@@ -754,7 +754,7 @@ fn draw_status(frame: &mut Frame, view: &View, area: Rect) {
         line.push_str(" │ ");
         line.push_str(message);
     }
-    line.push_str(" │ [Ctrl+R] rewrite  [Tab] focus  [F1] help  [Ctrl+Q] quit");
+    line.push_str(" │ [Ctrl+R] rewrite  [F1] help  [Ctrl+Q] quit");
     // No `Wrap`: the line is already guaranteed to fit, and leaving wrapping off makes
     // "never wraps" a property of the code rather than of the widget's defaults.
     frame.render_widget(Paragraph::new(Line::from(fit(&line, area.width))), area);
@@ -2350,6 +2350,10 @@ mod tests {
         assert!(
             status.contains("[F1] help"),
             "the panel is undiscoverable: {status:?}"
+        );
+        assert!(
+            !status.contains("[Tab]"),
+            "the focus hint is back; `F1` already lists it: {status:?}"
         );
     }
 

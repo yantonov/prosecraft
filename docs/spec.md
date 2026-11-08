@@ -75,7 +75,7 @@ Rules:
 ├ instructions ──────────────────┤├ process ───────────────────────┤
 │ editable, ~8 lines             ││ read-only, stdout+stderr, ~8    │
 └────────────────────────────────┘└────────────────────────────────┘
- source │ prose… │ idle          [Ctrl+R] rewrite  [Tab] focus  [Ctrl+Q] quit
+ source │ prose… │ idle          [Ctrl+R] rewrite  [F1] help  [Ctrl+Q] quit
 ```
 
 Four panes, all focusable. Two columns, 50/50.
@@ -102,8 +102,9 @@ Four panes, all focusable. Two columns, 50/50.
   border on one row, so the two halves of the frame line up.
 - Status line: harness name, session id (short form, `—` before the first rewrite), state
   (`idle` / `running` / `error`), then the key hints. The hints are `[Ctrl+R] rewrite`,
-  `[Tab] focus`, `[F1] help`, `[Ctrl+Q] quit` in that order; the rest of the key set is
-  reachable only from the help panel, because the row is one line that clips.
+  `[F1] help`, `[Ctrl+Q] quit` in that order; the rest of the key set is reachable only
+  from the help panel, because the row is one line that clips. `Tab` is not hinted: `F1`
+  is on the row, so the whole key table, focus cycling included, is one press away.
 
 ### Key bindings
 
