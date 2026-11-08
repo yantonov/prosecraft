@@ -28,6 +28,7 @@ mod layout;
 mod marker;
 mod panes;
 mod process;
+mod rewrite;
 mod ui;
 mod wrap;
 
@@ -105,25 +106,33 @@ impl Tui {
         } = self;
 
         let mut view = ui::View::new(config, *focus);
-        // The real clipboard for the running app; tests build views with the recording one.
+        // The real clipboard and the real harness adapter for the running app; tests build a
+        // view with the recording clipboard and a scripted child instead.
         view.clipboard = Box::new(crate::clipboard::System::new());
+        view.machine = Some(Box::new(rewrite::Machine::new(adapter_for(config.harness))));
 
-        event_loop(
+        // Ticking rather than blocking: a live rewrite delivers lines on the child's threads,
+        // and nothing can arrive if the loop is parked in `event::read` until the next key
+        // (spec §6.1b: drained once per tick, ~16 ms).
+        tick_loop(
             &mut view,
             |view| {
                 terminal.draw(|frame| ui::render(frame, view))?;
                 Ok(())
             },
-            |view| {
-                let event = event::read()?;
-                let outcome = match &event {
-                    Event::Key(key) => view.handle_key(key),
+            |view, timeout| {
+                if !event::poll(timeout)? {
+                    return Ok(Outcome::Continue);
+                }
+                let outcome = match event::read()? {
+                    Event::Key(key) => view.handle_key(&key),
                     // Resize and every other event leave the state alone; there is still a
                     // frame to draw for them, so they are not a quit.
                     _ => Outcome::Continue,
                 };
                 Ok(outcome)
             },
+            |view| view.tick(),
         )
     }
 }
@@ -134,20 +143,51 @@ impl Drop for Tui {
     }
 }
 
-/// Draws, then waits for one event, until the view asks to quit.
+/// The adapter for the harness chosen on the command line.
 ///
-/// The terminal and the event source are closures so both the draw and the quit decision can
-/// be tested without a TTY. The state they read and update is a parameter rather than a
-/// capture, because two closures capturing the same `&mut` cannot be built at all.
-fn event_loop<S>(
+/// `--harness` selects a binary, and each adapter is that binary's argv and event vocabulary.
+/// The pi adapter is the `pi-adapter` ticket and is not written yet, so `pi` currently runs
+/// through the claude adapter: the startup path accepts it because the lookup is the same, and
+/// refusing here would break `--harness pi --help`. The debug pane will show junk rather than
+/// a rewrite, which is honest about the state of that adapter.
+fn adapter_for(harness: cli::Harness) -> Box<dyn harness::HarnessAdapter> {
+    match harness {
+        cli::Harness::Claude | cli::Harness::Pi => Box::new(harness::claude::Claude),
+    }
+}
+
+/// How long the loop waits for input before ticking again.
+///
+/// ~16 ms is one frame, which is what makes a running rewrite look live (spec §6.1b: events
+/// are drained once per tick and rendered once per tick).
+const TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Draws, ticks, then waits at most one tick for input, until the view asks to quit.
+///
+/// Different from a blocking read loop in the one way that matters: it never parks
+/// indefinitely, so a run producing lines gets drained whether or not the user is typing.
+///
+/// The draw is driven by the tick, not by the event: a frame is drawn when a tick reports that
+/// something changed, so an idle app draws nothing and a streaming run is not redrawn once per
+/// arriving line (spec §6.1b).
+fn tick_loop<S>(
     state: &mut S,
     mut draw: impl FnMut(&mut S) -> io::Result<()>,
-    mut next_event: impl FnMut(&mut S) -> io::Result<Outcome>,
+    mut next: impl FnMut(&mut S, std::time::Duration) -> io::Result<Outcome>,
+    mut tick: impl FnMut(&mut S) -> bool,
 ) -> io::Result<()> {
+    // The first frame, so the panes appear before the user touches anything.
+    draw(state)?;
     loop {
-        draw(state)?;
-        if next_event(state)? == Outcome::Quit {
+        // A key gets one tick of budget to arrive, so typing feels immediate; whatever a live
+        // run produced in that window is drained on the following pass.
+        if next(state, TICK)? == Outcome::Quit {
             return Ok(());
+        }
+        // One draw per change, not one per event and not one per tick: an idle app draws
+        // nothing, and a streaming run draws once however many lines arrived (spec §6.1b).
+        if tick(state) {
+            draw(state)?;
         }
     }
 }
@@ -230,25 +270,26 @@ mod tests {
 
         let mut view = view();
         let mut draws = 0;
-        let result = event_loop(
+        let result = tick_loop(
             &mut view,
             |_| {
                 draws += 1;
                 Ok(())
             },
-            |view| {
-                let event = events
-                    .next()
-                    .expect("event_loop over-read its event source");
+            |view, _| {
+                let event = events.next().expect("tick_loop over-read its event source");
                 Ok(outcome_of(view, &event))
             },
+            |_| false,
         );
 
         // Ok here is the normal-quit path: `main` then returns success and `Tui` is dropped,
         // which is where the terminal is restored.
         assert!(result.is_ok());
-        // One draw per event, including the one that quits.
-        assert_eq!(draws, 3);
+        // One frame: the tick closure reports no change, so nothing redraws, which is the
+        // batching rule. What this test proves is that a Release event did not end the loop
+        // before the Press was reached, and that quitting still reaches `Ok`.
+        assert_eq!(draws, 1, "an unchanged loop redrew");
     }
 
     #[test]
@@ -262,26 +303,24 @@ mod tests {
 
         let mut view = view();
         view.state = ui::State::Running;
-        let mut draws = 0;
-        let result = event_loop(
+        let mut ticks = 0;
+        let result = tick_loop(
             &mut view,
-            |_| {
-                draws += 1;
-                Ok(())
-            },
-            |view| match events.next() {
+            |_| Ok(()),
+            |view, _| match events.next() {
                 Some(event) => Ok(outcome_of(view, &event)),
-                // The script is spent, so this is the only way out. If the ignored Ctrl+C
-                // had already ended the loop, the two draws below would be one.
+                // The script is spent, so this is the only way out.
                 None => Ok(Outcome::Quit),
+            },
+            |_| {
+                ticks += 1;
+                false
             },
         );
 
         assert!(result.is_ok());
-        // Two draws: one before the key and one after it was ignored. Stopping on the
-        // Ctrl+C would have exited after the first draw, and the note it wrote would never
-        // have been painted.
-        assert_eq!(draws, 2, "the loop stopped on an ignored Ctrl+C");
+        // The loop kept going after the ignored Ctrl+C, which is the property under test.
+        assert!(ticks >= 1, "the loop stopped on an ignored Ctrl+C");
         assert_eq!(view.state, ui::State::Running, "the state changed");
     }
 
@@ -289,10 +328,11 @@ mod tests {
     fn loop_propagates_draw_errors() {
         // The error path out of `run`, after which `main` prints and returns 1 and the
         // `Tui` drop guard restores the terminal.
-        let result = event_loop(
+        let result = tick_loop(
             &mut view(),
             |_| Err(io::Error::other("draw failed")),
-            |_| unreachable!("must not wait for an event after a failed draw"),
+            |_, _| unreachable!("must not wait for an event after a failed draw"),
+            |_| false,
         );
 
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
@@ -304,14 +344,68 @@ mod tests {
         // lets the installed panic hook restore the terminal.
         let result = panic::catch_unwind(|| {
             let mut view = view();
-            let _ = event_loop(
+            let _ = tick_loop(
                 &mut view,
                 |_| panic!("draw exploded"),
-                |_| unreachable!("must not wait for an event after a panicking draw"),
+                |_, _| unreachable!("must not wait for an event after a panicking draw"),
+                |_| false,
             );
         });
 
         assert!(result.is_err(), "the panic was swallowed");
+    }
+
+    #[test]
+    fn an_idle_tick_draws_nothing_and_a_dirty_one_draws_once() {
+        // This is the batching rule from spec §6.1b: one draw per change, not one per tick.
+        let mut draws = 0;
+        let mut rounds = 0;
+        let result = tick_loop(
+            &mut view(),
+            |_| {
+                draws += 1;
+                Ok(())
+            },
+            |_, _| {
+                rounds += 1;
+                // Two clean rounds then quit, so a draw can only come from the first frame.
+                if rounds > 2 {
+                    Ok(Outcome::Quit)
+                } else {
+                    Ok(Outcome::Continue)
+                }
+            },
+            |_| false,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(draws, 1, "an idle loop drew {draws} frames");
+    }
+
+    #[test]
+    fn a_dirty_tick_redraws() {
+        let mut draws = 0;
+        let mut rounds = 0;
+        let result = tick_loop(
+            &mut view(),
+            |_| {
+                draws += 1;
+                Ok(())
+            },
+            |_, _| {
+                rounds += 1;
+                if rounds > 1 {
+                    Ok(Outcome::Quit)
+                } else {
+                    Ok(Outcome::Continue)
+                }
+            },
+            |_| true,
+        );
+
+        assert!(result.is_ok());
+        // The first frame, then one per dirty tick before the quit.
+        assert_eq!(draws, 2, "a dirty tick did not redraw: {draws} draws");
     }
 
     #[test]

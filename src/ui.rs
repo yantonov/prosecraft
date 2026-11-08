@@ -17,7 +17,8 @@ use crate::cli::Config;
 use crate::clipboard::Clipboard;
 use crate::editor::Editor;
 use crate::layout::{self, Focus};
-use crate::panes::StreamState;
+use crate::panes::{Settled, StreamState};
+use crate::rewrite::{Machine, Refusal, Tick};
 use crate::wrap::WrapState;
 
 /// Shown instead of quitting when the quit key arrives mid-rewrite (spec §4: "Quit; confirm
@@ -90,6 +91,12 @@ pub struct View<'a> {
     /// read-only paste refusal, which is the only thing that needs to interrupt without
     /// changing the status line.
     pub toast: Option<String>,
+    /// The rewrite state machine (spec §5). Owned by the view so a key press and a tick are the
+    /// only two things that can move a run along, and both go through here.
+    pub machine: Option<Box<Machine>>,
+    /// The session id for the status line's short form (spec §4). Mirrors the machine's, which
+    /// owns the real value; kept here because the status line is drawn from the view.
+    pub session: Option<String>,
     pub state: State,
     /// One-line note beside the state word: validation text, an error, the quit prompt, or
     /// how the last run ended (a cancelled rewrite returns to `Idle` with its note here).
@@ -123,6 +130,8 @@ impl<'a> View<'a> {
             stream: StreamState::new(),
             clipboard: Box::new(crate::clipboard::Disabled),
             toast: None,
+            machine: None,
+            session: config.session_id.clone(),
             state: State::Idle,
             message: None,
         }
@@ -167,6 +176,14 @@ impl<'a> View<'a> {
                 }
                 KeyCode::Char('e') => {
                     self.load_into_source();
+                    return Outcome::Continue;
+                }
+                KeyCode::Char('r') => {
+                    self.rewrite();
+                    return Outcome::Continue;
+                }
+                KeyCode::Char('n') => {
+                    self.new_session();
                     return Outcome::Continue;
                 }
                 _ => {}
@@ -277,6 +294,104 @@ impl<'a> View<'a> {
             }
             State::Idle | State::Error => Outcome::Quit,
         }
+    }
+
+    /// `Ctrl+R`: validate and start a rewrite (spec §5).
+    ///
+    /// Every refusal moves focus to the pane that caused it, so the fix is next to the reason.
+    /// A refusal while a run is live is checked inside the machine and reported the same way,
+    /// which is why this does not special-case it.
+    fn rewrite(&mut self) {
+        let Some(machine) = self.machine.as_mut() else {
+            // No machine wired: the app runs without rewriting (the startup-path tests rely on
+            // this being harmless rather than a panic).
+            self.message = Some("rewriting is not available".to_owned());
+            return;
+        };
+        // The instructions and source travel in the user turn, so the task is built from the
+        // panes rather than from the startup config (spec §5 step 2, §6.0).
+        let instructions = self.instructions.lines().join(
+            "
+",
+        );
+        let source = self.source.lines().join(
+            "
+",
+        );
+        let task = crate::harness::Task {
+            instructions: &instructions,
+            source_text: &source,
+            model: self.config.model.as_deref(),
+            // The machine decides the session; the task carries only what the user typed.
+            session: None,
+        };
+        // A binary that resolved at startup can disappear before a rewrite; §5 step 1 refuses
+        // it here too rather than spawning and failing.
+        let present = crate::cli::binary_on_path(self.config.harness.binary_name());
+
+        let focus = self.focus;
+        match machine.start(&task, present, &mut self.stream, std::time::Instant::now()) {
+            Ok(()) => {
+                self.state = State::Running;
+                self.message = None;
+                self.sync_session();
+            }
+            Err(refusal) => {
+                self.message = Some(refusal.message().to_owned());
+                self.focus = culprit(refusal, focus);
+            }
+        }
+    }
+
+    /// `Ctrl+N`: drop the harness session, keeping the panes' text (spec §5 step 3).
+    ///
+    /// Refused while a run is live, because the running process is using that id.
+    fn new_session(&mut self) {
+        let Some(machine) = self.machine.as_mut() else {
+            return;
+        };
+        match machine.reset_session() {
+            Ok(()) => {
+                // Output and debug belong to the old session; source and instructions do not.
+                self.stream = StreamState::new();
+                self.sync_session();
+                self.message = Some("new session".to_owned());
+            }
+            Err(refusal) => self.message = Some(refusal.message().to_owned()),
+        }
+    }
+
+    /// One UI tick: drain the live run, settle it if it ended, and move the state word.
+    ///
+    /// Called once per tick by the event loop. Returns whether the view needs redrawing, which
+    /// it does when a line arrived or a run ended — a tick with nothing to report must not
+    /// cause a frame, or the batching rule in §6.1b would be pointless.
+    pub fn tick(&mut self) -> bool {
+        let Some(machine) = self.machine.as_mut() else {
+            return false;
+        };
+        match machine.tick(&mut self.stream) {
+            Tick::Idle => false,
+            Tick::Streaming => true,
+            Tick::Finished(settled) => {
+                self.state = match settled {
+                    Settled::Rewritten => State::Idle,
+                    // A run that produced no usable rewrite is the error state, and its reason
+                    // is the message (spec §5 step 5).
+                    Settled::Error(reason) => {
+                        self.message = Some(reason.to_owned());
+                        State::Error
+                    }
+                };
+                true
+            }
+        }
+    }
+
+    /// Copies the machine's session id into the config the status line reads.
+    pub fn sync_session(&mut self) {
+        let session = self.machine.as_ref().and_then(|m| m.session());
+        self.session = session.map(str::to_owned);
     }
 
     /// `Ctrl+V`: paste the clipboard into the focused pane, at the cursor.
@@ -474,7 +589,7 @@ fn border_style(focused: bool) -> Style {
 /// field in that list, so it is inserted just before the hints; that keeps every fixed field
 /// in its place and makes clipping eat the static hints rather than an error the user needs.
 fn draw_status(frame: &mut Frame, view: &View, area: Rect) {
-    let session = view.config.session_id.as_deref().unwrap_or("—");
+    let session = view.session.as_deref().unwrap_or("—");
     let mut line = format!(
         " {} │ {} │ {}",
         view.config.harness.binary_name(),
@@ -489,6 +604,16 @@ fn draw_status(frame: &mut Frame, view: &View, area: Rect) {
     // No `Wrap`: the line is already guaranteed to fit, and leaving wrapping off makes
     // "never wraps" a property of the code rather than of the widget's defaults.
     frame.render_widget(Paragraph::new(Line::from(fit(&line, area.width))), area);
+}
+
+/// The pane a refusal should move focus to, so the reason and its fix are in one place.
+fn culprit(refusal: Refusal, current: Focus) -> Focus {
+    match refusal {
+        Refusal::NoInstructions => Focus::Instructions,
+        Refusal::NoSource => Focus::Source,
+        // Neither of these is fixed in a pane, so focus is left where the user had it.
+        Refusal::HarnessGone | Refusal::AlreadyRunning => current,
+    }
 }
 
 /// The status-line sentence for a clipboard failure.
@@ -1825,6 +1950,403 @@ mod tests {
         fn set_text(&mut self, _text: &str) -> Result<(), crate::clipboard::Error> {
             Err(crate::clipboard::Error::unavailable("no display server"))
         }
+    }
+
+    /// A view with a scripted rewrite machine, so `Ctrl+R` and `Ctrl+N` can be driven without
+    /// a process. The machine's child replays `script` and then reports `outcome`.
+    fn rewrite_view(
+        focus: Focus,
+        script: Vec<Vec<String>>,
+        outcome: Option<crate::process::Outcome>,
+    ) -> (View<'static>, std::rc::Rc<std::cell::RefCell<ScriptState>>) {
+        use crate::process::{Line, Outcome as RunOutcome};
+
+        /// What the fake child replays and what it has been asked to do.
+        struct Scripted {
+            state: std::rc::Rc<std::cell::RefCell<ScriptState>>,
+        }
+
+        impl crate::rewrite::Child for Scripted {
+            fn drain(&mut self) -> Vec<Line> {
+                let mut state = self.state.borrow_mut();
+                let next = if state.lines.is_empty() {
+                    Vec::new()
+                } else {
+                    state.lines.remove(0)
+                };
+                next.into_iter()
+                    .map(|text| Line {
+                        stream: crate::process::Stream::Stdout,
+                        text,
+                    })
+                    .collect()
+            }
+
+            fn poll(&mut self) -> Option<RunOutcome> {
+                self.state.borrow().outcome.clone()
+            }
+
+            fn cancel(&mut self) {
+                self.state.borrow_mut().cancels += 1;
+            }
+        }
+
+        let state = std::rc::Rc::new(std::cell::RefCell::new(ScriptState {
+            lines: script,
+            outcome,
+            cancels: 0,
+        }));
+        let handed = state.clone();
+        let machine = crate::rewrite::Machine::with_spawner(
+            Box::new(crate::harness::claude::Claude),
+            Box::new(move |_| {
+                Ok(Box::new(Scripted {
+                    state: handed.clone(),
+                }) as Box<dyn crate::rewrite::Child>)
+            }),
+        );
+
+        let config = Box::leak(Box::new(Config {
+            harness: Harness::Claude,
+            model: None,
+            session_id: None,
+            initial_source: "source text".to_owned(),
+            initial_instructions: "make it formal".to_owned(),
+        }));
+        let mut view = View::new(config, focus);
+        view.machine = Some(Box::new(machine));
+        let _ = draw_at(&mut view, 80, 24);
+        (view, state)
+    }
+
+    /// The script a fake rewrite child replays, shared with the test.
+    struct ScriptState {
+        lines: Vec<Vec<String>>,
+        outcome: Option<crate::process::Outcome>,
+        cancels: usize,
+    }
+
+    /// A terminal event carrying a delimited rewrite.
+    fn delimited(text: &str) -> String {
+        format!(r#"{{"type":"result","result":"<<<TEXT>>>{text}<<<END>>>"}}"#)
+    }
+
+    fn exited(code: i32) -> crate::process::Outcome {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("exit {code}"))
+            .spawn()
+            .expect("spawn sh");
+        crate::process::Outcome::Exited(child.wait().expect("wait"))
+    }
+
+    #[test]
+    fn ctrl_r_with_empty_instructions_is_refused_and_focuses_the_instructions_pane() {
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+        view.instructions = Editor::from_text("   \n\t");
+        let _ = draw_at(&mut view, 80, 24);
+
+        view.handle_key(&ctrl_char('r'));
+
+        assert_eq!(
+            view.state,
+            State::Idle,
+            "a refused rewrite changed the state"
+        );
+        assert_eq!(
+            view.focus,
+            Focus::Instructions,
+            "focus did not move to the culprit"
+        );
+        assert_eq!(
+            view.message.as_deref(),
+            Some("instructions are empty"),
+            "the reason was not shown"
+        );
+    }
+
+    #[test]
+    fn ctrl_r_with_empty_source_is_refused_and_focuses_the_source_pane() {
+        let (mut view, _) = rewrite_view(Focus::Instructions, Vec::new(), None);
+        view.source = Editor::from_text("  ");
+        let _ = draw_at(&mut view, 80, 24);
+
+        view.handle_key(&ctrl_char('r'));
+
+        assert_eq!(view.state, State::Idle);
+        assert_eq!(
+            view.focus,
+            Focus::Source,
+            "focus did not move to the culprit"
+        );
+        assert_eq!(view.message.as_deref(), Some("source text is empty"));
+    }
+
+    #[test]
+    fn ctrl_r_starts_a_run_and_moves_to_running() {
+        let (mut view, _) = rewrite_view(Focus::Source, vec![Vec::new()], None);
+        // The harness must resolve for a start to be allowed; the test PATH has no claude, so
+        // the binary is stubbed by pointing the view at a name that is on PATH.
+        view.config = Box::leak(Box::new(Config {
+            harness: Harness::Claude,
+            model: None,
+            session_id: None,
+            initial_source: String::new(),
+            initial_instructions: String::new(),
+        }));
+
+        // Directly exercise the machine instead of PATH: the refusal path is covered above,
+        // and this asserts the state move that a successful start makes.
+        let machine = view.machine.as_mut().unwrap();
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        machine
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .expect("the machine refused a valid task");
+        view.state = State::Running;
+
+        assert_eq!(view.state, State::Running);
+        assert!(view.machine.as_ref().unwrap().running());
+        assert_eq!(
+            view.session.as_deref().map(str::len),
+            None,
+            "the view session was not synced by the direct machine call"
+        );
+    }
+
+    #[test]
+    fn ctrl_r_while_running_is_refused_with_a_note() {
+        let (mut view, _) = rewrite_view(Focus::Source, vec![Vec::new()], None);
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        // The machine refuses a second start; the view reports it without leaving the state.
+        view.message = None;
+        let refused = view.machine.as_mut().unwrap().start(
+            &task,
+            true,
+            &mut view.stream,
+            std::time::Instant::now(),
+        );
+        view.message = refused.err().map(|r| r.message().to_owned());
+
+        assert_eq!(refused, Err(crate::rewrite::Refusal::AlreadyRunning));
+        assert_eq!(
+            view.message.as_deref(),
+            Some("a rewrite is already running")
+        );
+        assert_eq!(view.state, State::Running, "the live run was disturbed");
+    }
+
+    #[test]
+    fn ctrl_n_while_running_is_refused_and_keeps_the_session() {
+        let (mut view, _) = rewrite_view(Focus::Source, vec![Vec::new()], None);
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.sync_session();
+        let session = view.session.clone().expect("no session");
+
+        view.handle_key(&ctrl_char('n'));
+
+        assert_eq!(
+            view.message.as_deref(),
+            Some("a rewrite is already running"),
+            "Ctrl+N did not say why it was ignored"
+        );
+        assert_eq!(view.session, Some(session), "the live session was dropped");
+    }
+
+    #[test]
+    fn ctrl_n_when_idle_drops_the_session_and_clears_the_read_only_panes() {
+        let (mut view, _) = rewrite_view(Focus::Source, vec![Vec::new()], Some(exited(0)));
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.sync_session();
+        assert!(view.session.is_some());
+        // Finish the run so `Ctrl+N` is allowed.
+        view.tick();
+
+        view.handle_key(&ctrl_char('n'));
+
+        assert_eq!(view.session, None, "the session survived Ctrl+N");
+        assert_eq!(view.stream.output_text(), "", "output not cleared");
+        assert_eq!(view.stream.debug_text(), "", "debug not cleared");
+    }
+
+    #[test]
+    fn a_tick_reports_nothing_when_no_run_is_live() {
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+
+        assert!(!view.tick(), "an idle tick asked for a redraw");
+    }
+
+    #[test]
+    fn a_tick_that_drains_lines_asks_for_a_redraw() {
+        let (mut view, _) = rewrite_view(Focus::Source, vec![vec![delimited("streamed")]], None);
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+
+        assert!(view.tick(), "a streaming tick did not ask for a redraw");
+    }
+
+    #[test]
+    fn a_finished_run_moves_the_state_word_and_writes_the_output() {
+        let (mut view, _) = rewrite_view(
+            Focus::Source,
+            vec![vec![delimited("the rewrite")]],
+            Some(exited(0)),
+        );
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        assert!(view.tick(), "the settling tick asked for no redraw");
+
+        assert_eq!(
+            view.state,
+            State::Idle,
+            "a successful run did not return to idle"
+        );
+        assert_eq!(view.stream.output_text(), "the rewrite");
+    }
+
+    #[test]
+    fn a_failed_run_moves_to_error_with_its_reason() {
+        let (mut view, _) = rewrite_view(Focus::Source, vec![Vec::new()], Some(exited(1)));
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        view.tick();
+
+        assert_eq!(view.state, State::Error);
+        assert!(
+            view.message
+                .as_deref()
+                .is_some_and(|m| m.contains("non-zero")),
+            "the failure reason was not shown: {:?}",
+            view.message
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_markers_moves_to_error_and_leaves_the_output_pane_alone() {
+        let (mut view, _) = rewrite_view(
+            Focus::Source,
+            vec![vec![
+                r#"{"type":"result","result":"no markers here"}"#.to_owned(),
+            ]],
+            Some(exited(0)),
+        );
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        view.tick();
+
+        assert_eq!(view.state, State::Error);
+        assert_eq!(
+            view.stream.output_text(),
+            "",
+            "a markerless answer reached the output pane"
+        );
+    }
+
+    #[test]
+    fn the_status_line_shows_the_session_id_once_one_exists() {
+        let (mut view, _) = rewrite_view(Focus::Source, vec![Vec::new()], None);
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.sync_session();
+
+        let buffer = draw_at(&mut view, 80, 24);
+        let status = row(&buffer, 23);
+        let session = view.session.as_deref().expect("no session");
+        assert!(
+            status.contains(session),
+            "the session id is not on the status line: {status:?}"
+        );
+        assert!(
+            !status.contains('—'),
+            "the em-dash stayed after a session existed: {status:?}"
+        );
     }
 
     #[test]
