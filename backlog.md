@@ -1,5 +1,5 @@
 ## Active
-- [ ] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]
+- [>] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [ ] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]

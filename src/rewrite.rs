@@ -208,7 +208,22 @@ impl Machine {
 
         // `None` on the first call of the run: the adapter generates the id and reports it
         // through the argv, which is where it is read back (spec §6.2).
-        let invocation = self.adapter.build(task).map_err(|_| Refusal::HarnessGone)?;
+        // The session flag comes from the machine, never from the caller: `None` on the first
+        // call of the run, so the adapter generates an id and reports it through the argv
+        // (spec §6.2), and the stored id on every later call, so the adapter sends `--resume`.
+        //
+        // Built here rather than trusting `task.session`, because a caller passing `None` every
+        // time would open a fresh session on every rewrite while the status line showed a
+        // stable id — the stored id would be decoration. This is what makes `--resume` reach
+        // the argv at all.
+        let built = Task {
+            session: self.session.as_deref(),
+            ..*task
+        };
+        let invocation = self
+            .adapter
+            .build(&built)
+            .map_err(|_| Refusal::HarnessGone)?;
 
         let child = match (self.spawner)(&invocation) {
             Ok(child) => child,
@@ -486,6 +501,114 @@ mod tests {
         machine.reset_session().unwrap();
 
         assert_eq!(machine.session(), None, "the session survived Ctrl+N");
+    }
+
+    #[test]
+    fn the_second_rewrite_resumes_the_session_the_first_one_created() {
+        // The bug this pins: the machine stored the id and reported it, but built the
+        // invocation from the caller's *task*, and every caller passed `session: None`. So
+        // each rewrite opened a new session, `--resume` never reached the argv, and the id on
+        // the status line was decoration.
+        //
+        // Asserted on the argv rather than on `session()`, because the stored id was already
+        // correct when the bug was live: only the flags the adapter was asked for can tell a
+        // resume from a second creation.
+        let seen: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>> = Default::default();
+        let recorder = seen.clone();
+        let mut machine = Machine::with_spawner(
+            Box::new(Claude),
+            Box::new(move |invocation| {
+                recorder.borrow_mut().push(invocation.args.clone());
+                Ok(Box::new(Scripted {
+                    inner: std::rc::Rc::new(std::cell::RefCell::new(Fake::new(
+                        vec![Vec::new(), Vec::new()],
+                        Some(exited(0)),
+                    ))),
+                }) as Box<dyn Child>)
+            }),
+        );
+        let mut stream = stream();
+
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+        let first = machine.session().map(str::to_owned).expect("no session");
+        machine.tick(&mut stream);
+
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 2, "expected two invocations");
+
+        // First call creates; second resumes. Both the absence and the presence matter.
+        assert!(
+            seen[0].iter().any(|arg| arg == "--session-id"),
+            "the first call did not create a session: {:?}",
+            seen[0]
+        );
+        assert!(
+            seen[1].iter().any(|arg| arg == "--resume"),
+            "the second call did not resume: {:?}",
+            seen[1]
+        );
+        assert!(
+            !seen[1].iter().any(|arg| arg == "--session-id"),
+            "the second call opened another session: {:?}",
+            seen[1]
+        );
+
+        let resumed = seen[1]
+            .iter()
+            .position(|arg| arg == "--resume")
+            .map(|at| seen[1][at + 1].clone());
+        assert_eq!(
+            resumed.as_deref(),
+            Some(first.as_str()),
+            "the second call resumed a different id"
+        );
+    }
+
+    #[test]
+    fn a_rewrite_after_ctrl_n_creates_a_session_again() {
+        // The other half of the lifecycle: dropping the id must put the next call back on
+        // `--session-id`, or Ctrl+N would look like it worked while resuming the old session.
+        let seen: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>> = Default::default();
+        let recorder = seen.clone();
+        let mut machine = Machine::with_spawner(
+            Box::new(Claude),
+            Box::new(move |invocation| {
+                recorder.borrow_mut().push(invocation.args.clone());
+                Ok(Box::new(Scripted {
+                    inner: std::rc::Rc::new(std::cell::RefCell::new(Fake::new(
+                        vec![Vec::new(), Vec::new()],
+                        Some(exited(0)),
+                    ))),
+                }) as Box<dyn Child>)
+            }),
+        );
+        let mut stream = stream();
+
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+        let first = machine.session().map(str::to_owned).expect("no session");
+        machine.tick(&mut stream);
+
+        machine.reset_session().unwrap();
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+        let second = machine.session().map(str::to_owned).expect("no session");
+
+        let seen = seen.borrow();
+        assert!(
+            seen[1].iter().any(|arg| arg == "--session-id"),
+            "a rewrite after Ctrl+N resumed instead of creating: {:?}",
+            seen[1]
+        );
+        assert_ne!(first, second, "Ctrl+N did not produce a fresh id");
     }
 
     #[test]

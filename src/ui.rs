@@ -2206,6 +2206,41 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_n_keeps_the_source_and_instructions() {
+        // Spec §5 step 3 clears harness context, not the user's work: the whole point of
+        // Ctrl+N is to start a fresh session over the same text, so losing the panes would
+        // make the key useless.
+        let (mut view, _) = rewrite_view(Focus::Source, vec![Vec::new()], Some(exited(0)));
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.tick();
+        view.source = Editor::from_text("the text to keep");
+        view.instructions = Editor::from_text("the instructions to keep");
+
+        view.handle_key(&ctrl_char('n'));
+
+        assert_eq!(
+            view.source.text(),
+            "the text to keep",
+            "Ctrl+N lost the source"
+        );
+        assert_eq!(
+            view.instructions.text(),
+            "the instructions to keep",
+            "Ctrl+N lost the instructions"
+        );
+    }
+
+    #[test]
     fn a_tick_reports_nothing_when_no_run_is_live() {
         let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
 
