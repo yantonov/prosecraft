@@ -23,6 +23,7 @@ use crate::harness::resolve;
 pub enum Harness {
     Claude,
     Pi,
+    Codex,
 }
 
 impl Harness {
@@ -31,6 +32,7 @@ impl Harness {
         match self {
             Self::Claude => "claude",
             Self::Pi => "pi",
+            Self::Codex => "codex",
         }
     }
 }
@@ -365,22 +367,70 @@ mod tests {
         assert_eq!(err.exit_code(), 2);
     }
 
+    /// Every harness the CLI accepts, so a table below cannot silently skip one.
+    const ALL_HARNESSES: [Harness; 3] = [Harness::Claude, Harness::Pi, Harness::Codex];
+
     #[test]
-    fn both_harness_values_parse() {
-        assert_eq!(
-            valid(&["prosecraft", "--harness", "claude"]).harness,
-            Harness::Claude
-        );
-        assert_eq!(
-            valid(&["prosecraft", "--harness", "pi"]).harness,
-            Harness::Pi
-        );
+    fn every_harness_value_parses() {
+        for harness in ALL_HARNESSES {
+            assert_eq!(
+                valid(&["prosecraft", "--harness", harness.binary_name()]).harness,
+                harness,
+                "--harness {} did not round-trip",
+                harness.binary_name()
+            );
+        }
     }
 
     #[test]
     fn harness_binary_names_match_the_cli_values() {
         assert_eq!(Harness::Claude.binary_name(), "claude");
         assert_eq!(Harness::Pi.binary_name(), "pi");
+        assert_eq!(Harness::Codex.binary_name(), "codex");
+    }
+
+    #[test]
+    fn the_startup_lookup_is_asked_for_the_selected_binary() {
+        // Constraint 3: the same name must reach the resolver, or the startup check and the
+        // spawn disagree about which file to run.
+        for harness in ALL_HARNESSES {
+            let seen = std::cell::Cell::new(None);
+            let mut clipboard = crate::clipboard::Recording::default();
+            let config = assemble(
+                valid(&["prosecraft", "--harness", harness.binary_name()]),
+                |binary| {
+                    seen.set(Some(binary.to_owned()));
+                    found(binary)
+                },
+                &mut clipboard,
+            )
+            .unwrap();
+
+            assert_eq!(
+                seen.take().as_deref(),
+                Some(harness.binary_name()),
+                "the resolver was not asked for {}",
+                harness.binary_name()
+            );
+            assert_eq!(
+                config.harness, harness,
+                "the selected harness was not carried into the config"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_codex_binary_is_one_line_naming_codex_and_exits_one() {
+        // The third harness must fail startup exactly like the other two rather than opening a
+        // window it cannot use.
+        let (result, reads) = assemble_args(&["prosecraft", "--harness", "codex"], not_found);
+        let err = result.unwrap_err();
+        let message = err.to_string();
+
+        assert_eq!(message.lines().count(), 1, "not one line: {message:?}");
+        assert!(message.contains("codex"), "binary not named: {message}");
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(reads, 0, "a refusal must not read the clipboard");
     }
 
     #[test]
@@ -417,25 +467,6 @@ mod tests {
             Error::HarnessMissing(harness, _) => assert_eq!(harness, Harness::Claude),
             other => panic!("expected HarnessMissing, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn harness_lookup_receives_the_binary_name_of_the_selected_harness() {
-        let seen = std::cell::Cell::new(None);
-        let args = valid(&["prosecraft", "--harness", "pi"]);
-        let mut clipboard = crate::clipboard::Recording::default();
-        let config = assemble(
-            args,
-            |binary| {
-                seen.set(Some(binary.to_owned()));
-                found(binary)
-            },
-            &mut clipboard,
-        )
-        .unwrap();
-
-        assert_eq!(seen.take().as_deref(), Some("pi"));
-        assert_eq!(config.harness, Harness::Pi);
     }
 
     #[test]

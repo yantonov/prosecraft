@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 1
 deps: [r26q4, v2ffc]
 attachments: []
 created: 2026-11-08T18:05:42Z
-updated: 2026-11-08T18:05:50Z
+updated: 2026-11-08T18:22:20Z
+closed-at: 2026-11-08T18:22:20Z
 ---
 # codex adapter: exec/exec resume argv, agent_message terminal text, thread id from the stream
 
@@ -93,3 +94,48 @@ returns the `text` of an `agent_message` item, and only that — never a tool it
   the table above names and none panicking.
 - A test asserts the prompt template is byte-identical to claude's and pi's, per §6.4.
 - `make check` green; live run recorded in the ticket.
+
+## Progress note
+
+The adapter is written and its 18 unit tests pass. `Codex` is not yet constructed anywhere,
+so `cargo build` reports `dead_code` for it and `OVERRIDES`; that clears in k6rqhh, which
+wires `--harness codex` to `adapter_for`. Leaving the ticket open until the live run and
+`make check` are both recorded.
+
+
+## Live run, recorded on codex-cli 0.159.0
+
+Ran the adapter's exact argv by hand — the same flags the const produces, the prompt on
+stdin via `-- -` — so the evidence covers the argv and not a hand-typed variant.
+
+**Both call shapes, one thread:**
+
+    thread_id 01a1bc64-7d1d-7a81-a785-16b8c63ebaba
+    call 1 (pirate): <<<TEXT>>>Arrr, send me the report, matey.<<<END>>>
+    call 2 (legal):  <<<TEXT>>>You are hereby requested to furnish the undersigned with the
+                     aforementioned report.<<<END>>>
+
+The id came from `thread.started` on stdout and the same id carried into `exec resume`, so
+the changed instructions took effect on one thread — the §6.0 regression, passing.
+
+**Markers with preamble requested** (the case the protocol exists for): instructions asked for
+a short explanation first; the reply was `<<<TEXT>>>...<<<END>>>` with nothing outside the
+markers, so extraction yields clean text and no commentary-stripping heuristic is involved.
+
+**Denial, through the app's own argv:**
+
+| attempt | result |
+|---|---|
+| write `PROBE-OUT.txt` | `access denied because the filesystem is read-only`, no file created |
+| quote the user's `AGENTS.md` | `NONE` |
+| search the web | `NO-WEB-ACCESS` |
+
+**Startup:** `--harness codex --version` exits 0 with no harness needed; with `PATH` pointed
+at an empty directory the app prints `harness binary codex not found on PATH` and exits 1
+before any terminal setup.
+
+**Not asserted, by design:** the debug pane does not stream. The whole `agent_message`
+arrives at once (§6.5), which is the harness's behaviour and is recorded in the spec rather
+than treated as a defect.
+
+`make check` green: 465 unit tests plus 7 integration tests.

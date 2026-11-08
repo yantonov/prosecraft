@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 1
 deps: [r26q4]
 attachments: []
 created: 2026-11-08T18:05:48Z
-updated: 2026-11-08T18:05:53Z
+updated: 2026-11-08T18:22:20Z
+closed-at: 2026-11-08T18:22:20Z
 ---
 # Wire --harness codex through the CLI, the adapter factory, and the startup lookup
 
@@ -39,3 +40,19 @@ Mechanical wiring only, no new logic:
 - `main::adapter_for` returns the codex adapter for `Harness::Codex`, asserted by a test
   (the existing one already distinguishes claude from pi, so it extends).
 - `make check` green.
+
+
+## Result
+
+- `cli::Harness::Codex` with `binary_name() == "codex"`; `--harness codex` parses and
+  appears in `--help` as `[possible values: claude, pi, codex]`.
+- `main::adapter_for` maps all three, asserted by a new test that each value selects the
+  adapter claiming that name — a missing arm would otherwise compile and drive the wrong argv.
+- The startup lookup is asserted per harness: the resolver is asked for the selected binary and
+  the value that reaches `Config.harness` is the same one, so constraint 3's "one verdict"
+  still holds for the third harness.
+- A missing codex binary is one stderr line naming `codex`, exit 1, no clipboard read.
+- `cargo build` is warning-free again: constructing `Codex` in `adapter_for` clears the
+  `dead_code` the adapter alone could not avoid.
+
+`make check` green.

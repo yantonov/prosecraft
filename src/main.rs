@@ -150,12 +150,13 @@ impl Drop for Tui {
 /// The adapter for the harness chosen on the command line.
 ///
 /// `--harness` selects a binary, and each adapter is that binary's argv and event vocabulary.
-/// The two are not interchangeable: claude resumes with `--resume` while pi keeps
-/// `--session-id`, and their event vocabularies share no type names.
+/// The three are not interchangeable: claude resumes with `--resume`, pi keeps `--session-id`,
+/// and codex continues with a `resume` subcommand while naming its own thread (spec §6).
 fn adapter_for(harness: cli::Harness) -> Box<dyn harness::HarnessAdapter> {
     match harness {
         cli::Harness::Claude => Box::new(harness::claude::Claude),
         cli::Harness::Pi => Box::new(harness::pi::Pi),
+        cli::Harness::Codex => Box::new(harness::codex::Codex),
     }
 }
 
@@ -468,6 +469,24 @@ mod tests {
             TERMINAL_RESTORED.load(Ordering::SeqCst),
             "the panic hook did not restore the terminal"
         );
+    }
+
+    #[test]
+    fn each_harness_selects_its_own_adapter() {
+        // The factory is the one place a `--harness` value becomes behaviour, so a missing arm
+        // would compile and then run the wrong harness's argv. Asserting on `name()` is the
+        // adapter's own claim about which binary it drives (spec §6).
+        for (harness, expected) in [
+            (cli::Harness::Claude, "claude"),
+            (cli::Harness::Pi, "pi"),
+            (cli::Harness::Codex, "codex"),
+        ] {
+            assert_eq!(
+                adapter_for(harness).name(),
+                expected,
+                "{harness:?} did not select its adapter"
+            );
+        }
     }
 
     #[test]

@@ -12,6 +12,7 @@
 //! would otherwise be interchangeable to a reader.
 
 pub mod claude;
+pub mod codex;
 pub mod pi;
 pub mod resolve;
 

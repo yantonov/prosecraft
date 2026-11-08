@@ -1,7 +1,4 @@
 ## Active
-- [>] Harness trait: a session id may come from the harness's own event stream #r26q4 <- [v2ffc]
-- [ ] codex adapter: exec/exec resume argv, agent_message terminal text, thread id from the stream #x3dtv2 <- [r26q4, v2ffc]
-- [ ] Wire --harness codex through the CLI, the adapter factory, and the startup lookup #k6rqhh <- [r26q4]
 - [ ] Live verify: codex end to end, session carried across rewrites, sandbox holds in-app #khtxa <- [k6rqhh, x3dtv2]
 - [ ] README: codex as a third harness, and the two ways it is not equal #rcbmo <- [x3dtv2]
 
@@ -12,6 +9,9 @@
 - [x] Keys are drawn only when a tick reports a change, so nothing typed shows #df6ic
 - [x] Resolve the harness program once, identically for the startup check and the spawn #o4snh
 - [x] Amend spec for codex: measured argv, session-from-stream, no delta stream #v2ffc
+- [x] Harness trait: a session id may come from the harness's own event stream #r26q4 <- [v2ffc]
+- [x] codex adapter: exec/exec resume argv, agent_message terminal text, thread id from the stream #x3dtv2 <- [r26q4, v2ffc]
+- [x] Wire --harness codex through the CLI, the adapter factory, and the startup lookup #k6rqhh <- [r26q4]
 - [x] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
 - [x] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
 - [x] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]
