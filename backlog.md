@@ -3,9 +3,10 @@
 - [ ] Rewrite validation and state machine #rewrite-flow <- [clipboard, marker-extract]
 - [ ] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
 - [ ] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]
+- [ ] Wire Editor and wrap into the editable panes #editor-wiring <- [editor-wrap, pane-routing]
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
-- [ ] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [pane-routing]
+- [ ] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]

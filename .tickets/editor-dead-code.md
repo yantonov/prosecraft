@@ -1,10 +1,10 @@
 ---
 status: open
 priority: 3
-deps: [pane-routing]
+deps: [editor-wiring]
 attachments: []
 created: 2026-11-07T17:03:36Z
-updated: 2026-11-07T17:03:36Z
+updated: 2026-11-08T07:46:18Z
 ---
 # Remove the dead_code allowance from src/editor.rs
 
