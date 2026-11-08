@@ -28,16 +28,13 @@ const CONFIRM_QUIT: &str = "press Ctrl+Q again to quit";
 
 /// The state word on the status line (spec §4: `idle` / `running` / `error`).
 ///
-/// Three values and no transitions: the rewrite flow that drives them is a later ticket, so
-/// this ticket only has to render the word and let a test set each value directly.
+/// Three values and no transitions of its own: `View::rewrite`, `View::tick` and
+/// `View::interrupt` decide when it moves, and the status line only renders the word.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum State {
     #[default]
     Idle,
     Running,
-    // Reached only from the rewrite flow, which is a later ticket: nothing outside the tests
-    // constructs it yet, and the variant has to exist now because the status line renders it.
-    #[allow(dead_code)]
     Error,
 }
 
@@ -253,8 +250,8 @@ impl<'a> View<'a> {
     }
 
     /// The §4 focus keys: `Tab`/`Shift+Tab` in reading order, `Ctrl+Left`/`Ctrl+Right` across
-    /// columns. Every other key is ignored here, so a key owned by a later ticket does nothing
-    /// rather than something surprising.
+    /// columns. Every other key is ignored here, so an unhandled key does nothing rather than
+    /// something surprising.
     ///
     /// Esc is in the fall-through arm on purpose: spec §4 fixes it as "does nothing in v0.1",
     /// and a key that silently starts doing something later is harder to notice than a test.
@@ -724,6 +721,14 @@ mod tests {
         predicted
     }
 
+    /// The cursor's visual position, from the wrap layer.
+    ///
+    /// A thin forwarder so `mod tests` can reach the `#[cfg(test)]` function: `cursor_position`
+    /// is compiled only for tests, and this helper is itself test-only.
+    fn cursor_from_wrap(editor: &crate::editor::Editor, width: u16) -> crate::wrap::VisualCursor {
+        crate::wrap::cursor_position(editor, width)
+    }
+
     /// Where the draw *would* put the cursor, taken from the same two functions the draw uses.
     ///
     /// Mirrors `draw_pane`: only the focused editable pane goes through `WrapState::render`,
@@ -740,7 +745,7 @@ mod tests {
         if inner.width == 0 || inner.height == 0 {
             return None;
         }
-        let cursor = crate::wrap::cursor_position(editor, inner.width);
+        let cursor = cursor_from_wrap(editor, inner.width);
         let scroll = wrap.scroll();
         if cursor.row < scroll || cursor.row >= scroll + usize::from(inner.height) {
             return None;

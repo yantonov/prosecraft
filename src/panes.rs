@@ -17,10 +17,6 @@
 //! a paging key arrives between draws and cannot know the width otherwise. Nothing here
 //! interprets markdown (spec §6.1b), so a line is drawn as exactly the characters it holds.
 
-// The tick loop that drains the process into `ingest`/`settle` is the `rewrite-flow` ticket,
-// so those have no caller yet. The attribute goes away with it.
-#![allow(dead_code)]
-
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

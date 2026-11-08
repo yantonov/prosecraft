@@ -1,5 +1,4 @@
 ## Active
-- [ ] Re-audit the dead_code allowances now the backlog is closed #dead-code-audit
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
@@ -25,4 +24,5 @@
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
 - [x] Pin LF line endings with .gitattributes #gitattributes <- [tui-dummy]
+- [x] Re-audit the dead_code allowances now the backlog is closed #dead-code-audit
 - [x] Investigate claude returning an empty result field #empty-result

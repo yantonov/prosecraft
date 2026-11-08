@@ -11,10 +11,6 @@
 //! is why it is named `HarnessAdapter` and never plain `Harness`: at a call site the two
 //! would otherwise be interchangeable to a reader.
 
-// No pane and no process code calls into the adapters yet; `process-spawn` wires them up.
-// The attribute goes away with that ticket.
-#![allow(dead_code)]
-
 pub mod claude;
 pub mod pi;
 

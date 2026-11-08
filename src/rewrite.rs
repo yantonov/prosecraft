@@ -149,17 +149,18 @@ impl Machine {
     /// because the ticket that tests it must not wait three minutes: injecting it here keeps
     /// the production path and the tested path the same code.
     ///
-    /// Used by the tests that would otherwise wait out the default, and by `main` once a
-    /// `--timeout` flag exists. Kept public because the alternative — a test-only constructor
-    /// — would leave the production timeout untested.
-    #[allow(dead_code)]
+    /// Test-only, and honestly marked: there is no `--timeout` flag, so nothing in `main`
+    /// needs it. It stays a normal method rather than a test-only constructor because the
+    /// timeout tests drive the production `start` path, and a `#[cfg(test)]` builder would
+    /// change the shape of the machine they are testing.
+    #[cfg(test)]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// A machine that spawns whatever `spawner` returns, for tests.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_spawner(adapter: Box<dyn HarnessAdapter>, spawner: Spawner) -> Self {
         Self {
             child: None,

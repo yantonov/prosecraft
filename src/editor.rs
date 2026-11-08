@@ -93,7 +93,8 @@ impl Editor {
     /// Moves the cursor to `(line, column)`, clamped into the buffer.
     ///
     /// Clamping rather than trusting the caller is what keeps the invariant above true for
-    /// positions that come from outside the model, e.g. a screen coordinate in a later ticket.
+    /// positions that come from outside the model, e.g. a screen coordinate derived from a
+    /// mouse event or a scroll offset.
     pub fn set_cursor(&mut self, line: usize, column: usize) {
         let line = line.min(self.lines.len() - 1);
         self.cursor = Cursor::new(line, column.min(self.line_len(line)));

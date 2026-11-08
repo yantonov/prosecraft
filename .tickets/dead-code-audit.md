@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 3
 deps: []
 attachments: []
 created: 2026-11-08T10:20:00Z
-updated: 2026-11-08T10:20:00Z
+updated: 2026-11-08T10:40:52Z
+closed-at: 2026-11-08T10:40:52Z
 ---
 # Re-audit the dead_code allowances now the backlog is closed
 
@@ -50,3 +51,28 @@ allowances were suppressing nothing:
 duplicates at the call site. Check for that before deleting: grep the call site for the
 behaviour, not the name. A `#[allow]` with a stale reason is worse than no attribute, because
 it reads as a decision someone made.
+
+## Resolved 2026-11-08: zero allowances remain, test count unchanged
+
+All four module-level allowances removed; both targeted ones in rewrite.rs and the one in
+ui.rs replaced. **No allowance survives**, and the test count is unchanged at 398 unit + 7
+integration, so nothing was deleted to make the lint quiet.
+
+Only five symbols were ever genuinely unused, and each was resolved without suppressing a
+warning:
+
+| Symbol | Resolution |
+|---|---|
+| `Run::spawn` | `#[cfg(test)]` — production always injects a timeout, and 8 tests use the default form rather than each repeating `DEFAULT_TIMEOUT` |
+| `Machine::with_timeout` | `#[cfg(test)]` — no `--timeout` flag exists; the timeout tests drive the production `start` path |
+| `Machine::with_spawner` | `#[cfg(test)]` — test constructor by design |
+| `wrap::cursor_position` | `#[cfg(test)]` — in-module callers already hold the rows they computed, so they call `project` directly |
+| `WrapState::scroll` | `#[cfg(test)]` — kept as a reader rather than exposing the field, so a test cannot write past the clamping |
+
+Four stale comments also named closed tickets as future work (`process-spawn`, `rewrite-flow`,
+`pane-routing`, and three others). All corrected: they now say what is true rather than what was
+expected to happen.
+
+**The pattern worth keeping:** `#[cfg(test)]` is the honest marker for "exists for tests".
+It is not the same as `#[allow(dead_code)]`, which says "exists for nothing yet and I am not
+saying why". The first is checkable, the second rots.

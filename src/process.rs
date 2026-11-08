@@ -41,10 +41,6 @@
 //!
 //! **Windows.** Portability is best-effort (spec §2) and the tests drive a `sh` script.
 
-// Nothing outside the tests calls this yet: the tick loop and the pane routing that consume
-// it are the `rewrite-flow` and `pane-routing` tickets. The attribute goes away with them.
-#![allow(dead_code)]
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -136,6 +132,12 @@ impl Run {
     /// `Err` is the only case where nothing was started: a spawn failure is reported to the
     /// caller so the UI can name the binary, which is not something that can be recovered
     /// from inside a run.
+    ///
+    /// Production always supplies its own timeout through [`Run::spawn_with_timeout`], because
+    /// the machine injects it. This is the no-timeout form the tests use, and it stays as a
+    /// named constructor rather than 8 tests each writing `DEFAULT_TIMEOUT` — which would
+    /// repeat the default at every call site and let them drift from the constant.
+    #[cfg(test)]
     pub fn spawn(invocation: &Invocation) -> std::io::Result<Self> {
         Self::spawn_with_timeout(invocation, DEFAULT_TIMEOUT)
     }

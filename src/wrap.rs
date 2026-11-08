@@ -30,10 +30,6 @@
 //!   position — and only the drawn position is clamped onto the last column, which is what
 //!   a terminal does at the edge anyway.
 
-// The pane wiring that consumes this API is a later ticket, so nothing outside the tests
-// calls it yet. The attribute goes away with that ticket.
-#![allow(dead_code)]
-
 use std::cell::Cell;
 
 use ratatui::Frame;
@@ -251,6 +247,18 @@ fn project(rows: &[VisualRow], editor: &Editor) -> VisualCursor {
 }
 
 /// The cursor's visual position for an editor and a width.
+///
+/// The callers inside this module already hold the rows they just computed, so they call
+/// [`project`] directly rather than rebuilding them here. This is the named entry point for
+/// everything else — the view's cursor tests and any future caller that only has an editor —
+/// and it is the place the projection is exercised directly at widths 1, 10 and narrower than
+/// the longest word.
+///
+/// Test-only, and honestly marked so: the callers inside this module already hold the rows
+/// they just computed, so they call [`project`] directly rather than rebuilding them twice.
+/// This is the named way for anything outside to ask where the cursor is, which is what the
+/// width-1, width-10 and narrower-than-the-longest-word tests use.
+#[cfg(test)]
 pub fn cursor_position(editor: &Editor, width: u16) -> VisualCursor {
     let rows = buffer_rows(editor, width);
     project(&rows, editor)
@@ -323,6 +331,11 @@ impl WrapState {
 
     /// First visible row, as last set. Not clamped here: the buffer can have shrunk since,
     /// and only a draw knows the width and height to clamp against.
+    ///
+    /// Test-only: the drawing code reads the offset while it already holds it, and no
+    /// production caller needs the number on its own. Kept as a reader rather than exposing
+    /// the field, so a test cannot write it and skip the clamping `scroll_to_cursor` does.
+    #[cfg(test)]
     pub fn scroll(&self) -> usize {
         self.scroll
     }
