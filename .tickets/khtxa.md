@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 2
 deps: [k6rqhh, x3dtv2]
 attachments: []
 created: 2026-11-08T18:05:49Z
-updated: 2026-11-08T18:05:53Z
+updated: 2026-11-08T18:24:08Z
+closed-at: 2026-11-08T18:24:08Z
 ---
 # Live verify: codex end to end, session carried across rewrites, sandbox holds in-app
 
@@ -54,3 +55,36 @@ Then, in the same session:
   outcome is appended to this ticket.
 - `make check` green.
 - Any deviation is filed as a new ticket rather than fixed here.
+
+
+## Result: the script is now executable, not prose
+
+No pty harness exists in this repo and the TUI takes over the terminal, so the manual script
+was turned into two `#[ignore]`d live tests that drive the **production** `Machine` with the
+real codex adapter — closer to the app than hand-typing an argv, and repeatable:
+
+    cargo test live_codex -- --ignored --nocapture
+
+`rewrite::live_codex::one_thread_carries_a_changed_instruction_and_nothing_is_written`
+(17.6 s, passed):
+
+- first rewrite as a pirate, second as a legal register, **one** thread id, different output —
+  the §6.0 regression, passing on codex;
+- the thread id is learned from `thread.started` (`01…` shaped) rather than from an argv;
+- neither `<<<TEXT>>>` nor `<<<END>>>` reaches the output pane, so extraction stripped them by
+  protocol;
+- `Ctrl+N` (`reset_session`) then a rewrite yields a **different** thread id;
+- the debug pane carries the app lines, so the stream went where it should.
+
+    cargo test live_codex_sandbox -- --ignored --nocapture
+
+`a_run_that_is_told_to_write_a_file_leaves_no_file` (8.6 s, passed): the app's own argv,
+instructed to create a uniquely-named file in the temp dir, created nothing. This is the
+ticket's sandbox assertion, run in-app rather than by hand.
+
+**Not asserted, by design:** the debug pane does not stream. Measured and recorded in §6.5 —
+the whole `agent_message` arrives at once — so "the pane sits inert" is the documented
+behaviour, not a defect to file.
+
+Both are `#[ignore]`d so `make check` stays hermetic and fast; they need credentials and
+network. `make check` green without them.

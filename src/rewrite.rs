@@ -1322,3 +1322,172 @@ mod tests {
         assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(180));
     }
 }
+
+#[cfg(test)]
+mod live_codex {
+    //! A live end-to-end run against the installed `codex`, driven through the production
+    //! `Machine` rather than by hand-assembling an argv.
+    //!
+    //! `#[ignore]` because it needs credentials, network and ~40s: it is the manual verify
+    //! script from the ticket, made runnable so the next person does not retype it. Run with
+    //! `cargo test live_codex -- --ignored --nocapture`.
+
+    use super::*;
+    use crate::harness::codex::Codex;
+    use std::time::Instant;
+
+    /// Builds a machine pointed at the real `codex` binary the way `main` does.
+    fn machine() -> Machine {
+        let program = crate::harness::resolve::lookup("codex")
+            .program()
+            .expect("codex must be installed for this test")
+            .to_path_buf();
+        Machine::new(Box::new(Codex), program, false)
+    }
+
+    /// Starts one rewrite and drains it to completion, returning the settled result.
+    fn run(
+        machine: &mut Machine,
+        stream: &mut StreamState,
+        instructions: &str,
+        source: &str,
+    ) -> Settled {
+        let task = Task {
+            instructions,
+            source_text: source,
+            model: None,
+            session: None,
+            transport: Transport::Argv,
+        };
+        machine
+            .start(&task, true, stream, Instant::now())
+            .expect("the run was refused");
+
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            match machine.tick(stream) {
+                Tick::Finished(settled) => return settled,
+                Tick::Streaming | Tick::Idle => {
+                    assert!(Instant::now() < deadline, "the run never finished");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "live run: needs creds, network and ~40s"]
+    fn one_thread_carries_a_changed_instruction_and_nothing_is_written() {
+        let mut machine = machine();
+        let mut stream = StreamState::new();
+        let source = "Please send me the report.";
+
+        assert_eq!(
+            run(&mut machine, &mut stream, "rewrite as a pirate", source),
+            Settled::Rewritten
+        );
+        let first = stream.output_text();
+        let thread = machine
+            .session()
+            .map(str::to_owned)
+            .expect("no thread id learned");
+        // codex's ids are UUID-shaped; the point is that it came from `thread.started`.
+        assert!(thread.starts_with("01"), "unexpected thread id: {thread}");
+
+        assert_eq!(
+            run(
+                &mut machine,
+                &mut stream,
+                "rewrite in a very formal legal register",
+                source
+            ),
+            Settled::Rewritten
+        );
+        let second = stream.output_text();
+
+        assert_ne!(
+            first, second,
+            "the changed instruction had no effect on the same thread"
+        );
+        assert_eq!(
+            machine.session().map(str::to_owned),
+            Some(thread.clone()),
+            "the thread changed"
+        );
+        // The markers never reach the output pane: extraction stripped them by protocol.
+        for text in [&first, &second] {
+            assert!(!text.contains("<<<TEXT>>>"), "markers leaked: {text}");
+            assert!(!text.contains("<<<END>>>"), "markers leaked: {text}");
+        }
+
+        // Ctrl+N must open a new thread rather than continue this one.
+        machine.reset_session().expect("idle");
+        assert_eq!(machine.session(), None);
+        assert_eq!(
+            run(&mut machine, &mut stream, "rewrite as a pirate", source),
+            Settled::Rewritten
+        );
+        assert_ne!(
+            machine.session().map(str::to_owned),
+            Some(thread.clone()),
+            "Ctrl+N continued the old thread"
+        );
+
+        // The debug pane is where the event stream went, and it is not empty.
+        assert!(stream.debug_text().contains("run started"), "no app lines");
+    }
+}
+
+#[cfg(test)]
+mod live_codex_sandbox {
+    //! The sandbox assertion from the ticket, as a live test: the app's own argv must not let
+    //! codex touch the filesystem. `#[ignore]` for the same reason as `live_codex`.
+
+    use super::*;
+    use crate::harness::codex::Codex;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "live run: needs creds, network and ~20s"]
+    fn a_run_that_is_told_to_write_a_file_leaves_no_file() {
+        // A unique name in the temp dir, so a stale file from another run cannot pass this.
+        let marker = format!("prosecraft-codex-sandbox-{}.txt", std::process::id());
+        let path = std::env::temp_dir().join(&marker);
+        let _ = std::fs::remove_file(&path);
+
+        let program = crate::harness::resolve::lookup("codex")
+            .program()
+            .expect("codex must be installed for this test")
+            .to_path_buf();
+        let mut machine = Machine::new(Box::new(Codex), program, false);
+        let mut stream = StreamState::new();
+        let instructions = format!(
+            "Create a file named {marker} in {} containing hi, then say DONE.",
+            std::env::temp_dir().display()
+        );
+        let task = Task {
+            instructions: &instructions,
+            source_text: "any text",
+            model: None,
+            session: None,
+            transport: Transport::Argv,
+        };
+        machine
+            .start(&task, true, &mut stream, Instant::now())
+            .expect("refused");
+
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while Instant::now() < deadline {
+            if let Tick::Finished(_) = machine.tick(&mut stream) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            !path.exists(),
+            "codex wrote {} — the sandbox did not hold (spec §6.5)",
+            path.display()
+        );
+    }
+}

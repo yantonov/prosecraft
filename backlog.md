@@ -1,5 +1,4 @@
 ## Active
-- [ ] Live verify: codex end to end, session carried across rewrites, sandbox holds in-app #khtxa <- [k6rqhh, x3dtv2]
 - [ ] README: codex as a third harness, and the two ways it is not equal #rcbmo <- [x3dtv2]
 
 ## Closed
@@ -40,6 +39,7 @@
 - [x] Bind focus moves to Shift+arrows as well as Ctrl+arrows #shift-arrows-focus
 - [x] Ctrl+K clears the focused editable pane #ff2ayq
 - [x] README: why, install, usage examples #c7ka6l
+- [x] Live verify: codex end to end, session carried across rewrites, sandbox holds in-app #khtxa <- [k6rqhh, x3dtv2]
 - [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
