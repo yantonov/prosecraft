@@ -135,6 +135,15 @@ const MARKER_DEMAND: &str = "Return only the rewritten text, wrapped between the
 /// The demand sits last because models weight the tail of the prompt most heavily, and
 /// the instructions are a free-text pane, so the markers are what make the answer
 /// extractable at all rather than a guess at where the rewrite starts (spec §6.1, §6.1a).
+///
+/// **Known limitation, deliberately not fixed.** If the source text itself contains
+/// `<<<TEXT>>>` or `<<<END>>>`, extraction finds the first complete pair and can cut the
+/// rewrite short. Escaping or rewriting the source here would be a silent transformation of
+/// the user's input, which is worse than the edge case: rewriting text that *discusses* these
+/// markers is unlikely, and when it happens the result is visible in the output pane and can
+/// be corrected outside the app. The alternative — hashing the markers, or picking a delimiter
+/// that cannot occur — trades a rare, visible problem for a permanent one, since the model
+/// must be told the delimiter in the prompt anyway.
 pub fn prompt(task: &Task<'_>) -> String {
     format!(
         "INSTRUCTIONS:\n{}\n\nTEXT TO REWRITE:\n{}\n\n{MARKER_DEMAND}",
@@ -193,6 +202,107 @@ mod tests {
         );
         assert!(text.contains(source), "source altered: {text:?}");
         assert!(text.starts_with("INSTRUCTIONS:\n- keep the dashes"));
+    }
+
+    #[test]
+    fn a_first_call_and_a_continuation_carry_the_identical_prompt() {
+        // Spec §6.0: instructions travel in the user turn precisely so that a continuation
+        // behaves like a first call. If the template differed, editing the instructions and
+        // pressing Ctrl+R again would work on one call shape and not the other.
+        use crate::harness::HarnessAdapter;
+        use crate::harness::claude::Claude;
+
+        let first = HarnessAdapter::build(
+            &Claude,
+            &Task {
+                instructions: "make it formal",
+                source_text: "hello
+there",
+                model: None,
+                session: None,
+            },
+        )
+        .unwrap();
+        let next = HarnessAdapter::build(
+            &Claude,
+            &Task {
+                instructions: "make it formal",
+                source_text: "hello
+there",
+                model: None,
+                session: Some("11111111-2222-4333-8444-555555555555"),
+            },
+        )
+        .unwrap();
+
+        // The prompt is the last argv element in both, and it must be byte-identical.
+        assert_eq!(
+            first.args.last(),
+            next.args.last(),
+            "the continuation prompt differs from the first-call prompt"
+        );
+        // And it is the template, not something the adapter invented.
+        assert_eq!(
+            first.args.last().unwrap(),
+            &prompt(&task(
+                "make it formal",
+                "hello
+there"
+            ))
+        );
+    }
+
+    #[test]
+    fn the_golden_template_is_byte_for_byte_what_the_ticket_specifies() {
+        // The ticket asks for this in as many words, so it is spelled out as one literal with
+        // no formatting splices: the point is that a reader can compare it against spec §6.1
+        // by eye, and that a stray space or a reordered line fails the test rather than
+        // slipping through a helper.
+        let instructions = "rewrite in a formal register";
+        let source = "hey can u send me that file
+
+thanks";
+        let expected = concat!(
+            "INSTRUCTIONS:
+",
+            "rewrite in a formal register
+",
+            "
+",
+            "TEXT TO REWRITE:
+",
+            "hey can u send me that file
+",
+            "
+",
+            "thanks
+",
+            "
+",
+            "Return only the rewritten text, wrapped between the markers <<<TEXT>>> and <<<END>>>. ",
+            "Put nothing else between the markers. Anything outside the markers is ignored.",
+        );
+
+        assert_eq!(prompt(&task(instructions, source)), expected);
+    }
+
+    #[test]
+    fn a_source_containing_the_markers_is_passed_through_unescaped() {
+        // The documented limitation, pinned as behaviour rather than left to prose: the source
+        // is never transformed, even when it contains the delimiters. Extraction may then cut
+        // the rewrite short, which is visible in the output pane and correctable outside.
+        let source = "the protocol uses <<<TEXT>>> and <<<END>>> as delimiters";
+        let text = prompt(&task("explain it", source));
+
+        assert!(
+            text.contains(source),
+            "the source was escaped or altered: {text:?}"
+        );
+        assert_eq!(
+            text.matches("<<<TEXT>>>").count(),
+            2,
+            "the source's marker should appear exactly as written, alongside the demand"
+        );
     }
 
     #[test]

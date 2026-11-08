@@ -1,5 +1,5 @@
 ## Active
-- [ ] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
+- [>] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
 - [ ] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
