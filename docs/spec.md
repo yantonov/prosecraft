@@ -118,7 +118,6 @@ Four panes, all focusable. Two columns, 50/50.
 | `Ctrl+↑` / `Ctrl+↓` | Switch row (source ↔ instructions, output ↔ debug); no wrap |
 | `Ctrl+Y` | Copy the focused pane's text to the clipboard |
 | `Ctrl+V` | Paste the clipboard into the focused pane (editable panes only) |
-| `Ctrl+E` | Load the clipboard into the source pane, replacing it |
 | arrow keys | Move cursor (editable) or scroll (read-only) |
 | `PgUp` / `PgDn` | Scroll by a page in the focused pane |
 | `F1` | Toggle the key-bindings help panel. Any key closes it; the key that closes it does nothing else |

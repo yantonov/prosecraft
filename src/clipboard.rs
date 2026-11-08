@@ -1,7 +1,7 @@
 //! The system clipboard: the one piece of state outside the app (spec §1).
 //!
 //! The app reads the clipboard at startup for the initial source text and on demand for
-//! `Ctrl+V`/`Ctrl+E`, and writes it for `Ctrl+Y` (spec §4). That is the whole surface: no
+//! `Ctrl+V`, and writes it for `Ctrl+Y` (spec §4). That is the whole surface: no
 //! config file, no session pointer, nothing else is persisted, which is why `Ctrl+N` is the
 //! only reset the app needs.
 //!

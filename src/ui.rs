@@ -203,8 +203,9 @@ impl<'a> View<'a> {
                 _ => {}
             }
         }
-        // The clipboard keys (spec §4). Distinct on purpose: Ctrl+V is cursor-relative and
-        // respects focus, Ctrl+E is a whole-pane replace that always targets source.
+        // The clipboard keys (spec §4). `Ctrl+V` is cursor-relative and respects focus, which
+        // is the whole of the paste surface: pasting into a focused source pane replaces what
+        // is there, so no whole-pane replace key is needed alongside it.
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
                 KeyCode::Char('v') => {
@@ -213,10 +214,6 @@ impl<'a> View<'a> {
                 }
                 KeyCode::Char('y') => {
                     self.copy();
-                    return Outcome::Continue;
-                }
-                KeyCode::Char('e') => {
-                    self.load_into_source();
                     return Outcome::Continue;
                 }
                 KeyCode::Char('r') => {
@@ -505,23 +502,6 @@ impl<'a> View<'a> {
         }
     }
 
-    /// `Ctrl+E`: replace the source pane with the clipboard, and show that it happened.
-    ///
-    /// Always the source pane whatever has focus (spec §4 says so explicitly), and focus moves
-    /// there afterwards, because a replacement the user cannot see is indistinguishable from
-    /// nothing happening.
-    fn load_into_source(&mut self) {
-        match self.clipboard.get_text() {
-            Ok(Some(text)) if !text.is_empty() => {
-                self.source = Editor::from_text(&text);
-                self.focus = Focus::Source;
-                self.message = None;
-            }
-            Ok(_) => self.message = Some("clipboard is empty".to_owned()),
-            Err(err) => self.message = Some(failure(&err)),
-        }
-    }
-
     /// The editor and wrap state of one editable pane, mutably.
     ///
     /// A pair rather than a merged type: the buffer is logical and width-free, the wrap state
@@ -586,7 +566,7 @@ fn draw_toast(frame: &mut Frame, text: &str, area: Rect) {
 /// table, because this list is that table's only on-screen copy: a binding that is added there
 /// and forgotten here would be invisible to the user. The arrows are the spec's own glyphs, and
 /// they are also the widest cell in the column.
-const HELP_ROWS: [(&str, &str); 13] = [
+const HELP_ROWS: [(&str, &str); 12] = [
     ("Ctrl+R", "rewrite, or resend into the same session"),
     (
         "Ctrl+N",
@@ -599,7 +579,6 @@ const HELP_ROWS: [(&str, &str); 13] = [
     ("Ctrl+↑ / ↓", "switch row; no wrap"),
     ("Ctrl+Y", "copy the focused pane"),
     ("Ctrl+V", "paste into an editable pane"),
-    ("Ctrl+E", "load the clipboard into source"),
     ("arrows", "move the cursor, or scroll"),
     ("PgUp / PgDn", "scroll by a page"),
     ("F1 / any key", "close this panel"),
@@ -2100,43 +2079,28 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_e_replaces_the_source_from_any_focus_and_moves_focus_there() {
+    fn ctrl_e_is_not_a_binding_and_leaves_every_pane_alone() {
+        // `Ctrl+V` on a focused source pane is the only way in, so `Ctrl+E` must be inert: no
+        // character typed into the buffer and no pane replaced behind the user's back.
         for focus in Focus::ALL {
             let mut view = clipboard_view(focus, crate::clipboard::Recording::with("replacement"));
             view.source = Editor::from_text("old");
+            view.instructions = Editor::from_text("also old");
 
             view.handle_key(&ctrl_char('e'));
 
             assert_eq!(
                 view.source.text(),
-                "replacement",
-                "Ctrl+E from {focus:?} did not target the source pane"
+                "old",
+                "Ctrl+E wrote to source at {focus:?}"
             );
             assert_eq!(
-                view.focus,
-                Focus::Source,
-                "focus did not move to the replaced pane from {focus:?}"
+                view.instructions.text(),
+                "also old",
+                "Ctrl+E typed into instructions at {focus:?}"
             );
+            assert_eq!(view.focus, focus, "Ctrl+E moved focus from {focus:?}");
         }
-    }
-
-    #[test]
-    fn ctrl_e_with_an_empty_clipboard_never_wipes_the_source() {
-        let mut view = clipboard_view(Focus::Source, crate::clipboard::Recording::default());
-        view.source = Editor::from_text("keep me");
-
-        view.handle_key(&ctrl_char('e'));
-
-        assert_eq!(
-            view.source.text(),
-            "keep me",
-            "an empty clipboard wiped the pane"
-        );
-        assert!(
-            view.message.as_deref().is_some_and(|m| m.contains("empty")),
-            "no note about the empty clipboard: {:?}",
-            view.message
-        );
     }
 
     #[test]
