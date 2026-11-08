@@ -310,14 +310,8 @@ impl<'a> View<'a> {
         };
         // The instructions and source travel in the user turn, so the task is built from the
         // panes rather than from the startup config (spec §5 step 2, §6.0).
-        let instructions = self.instructions.lines().join(
-            "
-",
-        );
-        let source = self.source.lines().join(
-            "
-",
-        );
+        let instructions = self.instructions.text();
+        let source = self.source.text();
         let task = crate::harness::Task {
             instructions: &instructions,
             source_text: &source,
@@ -407,13 +401,11 @@ impl<'a> View<'a> {
         }
         match self.clipboard.get_text() {
             Ok(Some(text)) if !text.is_empty() => {
-                // A multi-line paste arrives with newlines, and `insert_char` routes those to
-                // `insert_newline`, so pasted prose lands as real lines rather than one long
-                // row. Invalid UTF-8 was already made lossy when it was read.
+                // `insert_str` routes newlines to `insert_newline`, so pasted prose lands as
+                // real lines rather than one long row. Invalid UTF-8 was already made lossy
+                // when the clipboard was read.
                 if let Some((editor, _)) = self.editable(self.focus) {
-                    for c in text.chars() {
-                        editor.insert_char(c);
-                    }
+                    editor.insert_str(&text);
                 }
                 self.message = None;
             }
@@ -429,14 +421,8 @@ impl<'a> View<'a> {
     /// debug pane useful: its content can be taken somewhere else to read.
     fn copy(&mut self) {
         let text = match self.focus {
-            Focus::Source => self.source.lines().join(
-                "
-",
-            ),
-            Focus::Instructions => self.instructions.lines().join(
-                "
-",
-            ),
+            Focus::Source => self.source.text(),
+            Focus::Instructions => self.instructions.text(),
             Focus::Output => self.stream.output_text(),
             Focus::Debug => self.stream.debug_text(),
         };

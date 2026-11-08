@@ -13,10 +13,6 @@
 //! There is no selection and no undo (spec §2), and no key handling: the cursor is a model,
 //! so every operation is directly testable without a terminal.
 
-// The pane wiring that consumes this API is a later ticket, so nothing outside the tests
-// calls these methods yet. The attribute goes away with that ticket.
-#![allow(dead_code)]
-
 /// A position in the buffer: a line index and a char index within that line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cursor {
@@ -101,10 +97,6 @@ impl Editor {
     pub fn set_cursor(&mut self, line: usize, column: usize) {
         let line = line.min(self.lines.len() - 1);
         self.cursor = Cursor::new(line, column.min(self.line_len(line)));
-    }
-
-    pub fn line_count(&self) -> usize {
-        self.lines.len()
     }
 
     /// Char length of `line`; 0 for an out-of-range index, which is the value the clamping
@@ -200,27 +192,6 @@ impl Editor {
             self.cursor = Cursor::new(line + 1, 0);
         }
     }
-
-    /// One logical line up, clamping the column to the target line's length.
-    ///
-    /// No wrap awareness: a visual row produced by wrapping is invisible here, which is what
-    /// the wrap ticket replaces with a row-level move.
-    pub fn move_up(&mut self) {
-        let line = self.cursor.line();
-        if line > 0 {
-            self.cursor = Cursor::new(line - 1, self.cursor.column().min(self.line_len(line - 1)));
-        }
-    }
-
-    /// One logical line down, clamping the column to the target line's length. A clamped
-    /// column is not remembered: moving back up returns this line's own end, not the column
-    /// the cursor had before the clamp.
-    pub fn move_down(&mut self) {
-        let line = self.cursor.line();
-        if line + 1 < self.lines.len() {
-            self.cursor = Cursor::new(line + 1, self.cursor.column().min(self.line_len(line + 1)));
-        }
-    }
 }
 
 /// Byte offset of char index `column`, or the line's length when `column` is past the end.
@@ -234,6 +205,22 @@ fn byte_index(line: &str, column: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test-only accessor: the number of logical lines.
+    ///
+    /// `Editor` does not expose this because nothing in the app needs it — the wrap layer
+    /// asks for `lines()` and counts them itself, since it works in visual rows. A test asking
+    /// "how many lines did that edit produce" is a different question, so the helper lives
+    /// here rather than widening the production type.
+    trait LineCount {
+        fn line_count(&self) -> usize;
+    }
+
+    impl LineCount for Editor {
+        fn line_count(&self) -> usize {
+            self.lines().len()
+        }
+    }
 
     /// Builds an editor from text and asserts the invariant the rest of the tests rely on:
     /// the cursor names a real position inside the buffer.
@@ -404,7 +391,7 @@ mod tests {
     #[test]
     fn insert_char_on_a_later_line_lands_on_that_line() {
         let mut editor = editor("one\ntwo");
-        editor.move_up();
+        editor.set_cursor(0, 3);
         editor.insert_char('!');
 
         assert_eq!(editor.text(), "one!\ntwo");
@@ -582,7 +569,7 @@ mod tests {
     #[test]
     fn delete_at_end_of_line_joins_with_the_next_line() {
         let mut editor = editor("ab\ncd");
-        editor.move_up();
+        editor.set_cursor(0, 2);
 
         assert_at(&editor, 0, 2);
         editor.delete();
@@ -639,7 +626,7 @@ mod tests {
     #[test]
     fn left_and_right_cross_line_boundaries() {
         let mut editor = editor("ab\ncd");
-        editor.move_up();
+        editor.set_cursor(0, 2);
         assert_at(&editor, 0, 2);
 
         // Right at end of line steps onto the next line's first column.
@@ -686,104 +673,6 @@ mod tests {
 
         assert_at(&editor, 0, 0);
         assert_eq!(editor.text(), "");
-    }
-
-    #[test]
-    fn up_and_down_move_by_logical_line() {
-        let mut editor = editor("a\nbb\nccc");
-        assert_at(&editor, 2, 3);
-
-        editor.move_up();
-        assert_at(&editor, 1, 2);
-        editor.move_up();
-        assert_at(&editor, 0, 1);
-        editor.move_down();
-        assert_at(&editor, 1, 1);
-        editor.move_down();
-        assert_at(&editor, 2, 1);
-    }
-
-    #[test]
-    fn vertical_movement_does_not_leave_the_buffer() {
-        let mut editor = editor("first\nsecond");
-        // "first" is 5 chars, so the column clamps on the way up and stays clamped.
-        editor.move_up();
-        assert_at(&editor, 0, 5);
-        for _ in 0..3 {
-            editor.move_up();
-            assert_at(&editor, 0, 5);
-        }
-
-        editor.move_down();
-        for _ in 0..3 {
-            editor.move_down();
-            assert_at(&editor, 1, 5);
-        }
-    }
-
-    #[test]
-    fn vertical_movement_on_an_empty_buffer_is_a_no_op() {
-        let mut editor = Editor::new();
-        editor.move_up();
-        editor.move_down();
-
-        assert_at(&editor, 0, 0);
-    }
-
-    #[test]
-    fn vertical_movement_clamps_the_column_to_the_target_line() {
-        let mut editor = editor("a\nlonger line");
-        assert_at(&editor, 1, 11);
-
-        // The short line cannot hold column 11, so the cursor stops at its length.
-        editor.move_up();
-        assert_at(&editor, 0, 1);
-
-        // Moving back down starts from this line's column, not the remembered one.
-        editor.move_down();
-        assert_at(&editor, 1, 1);
-    }
-
-    #[test]
-    fn vertical_movement_keeps_the_column_when_the_target_line_fits_it() {
-        let mut editor = editor("abcdef\nab\nabcdef");
-        for _ in 0..5 {
-            editor.move_left();
-        }
-        assert_at(&editor, 2, 1);
-
-        editor.move_up();
-        assert_at(&editor, 1, 1);
-        editor.move_up();
-        assert_at(&editor, 0, 1);
-        editor.move_down();
-        assert_at(&editor, 1, 1);
-        editor.move_down();
-        assert_at(&editor, 2, 1);
-    }
-
-    #[test]
-    fn vertical_movement_lands_on_an_empty_line_at_column_zero() {
-        let mut editor = editor("abc\n\nabc");
-        assert_at(&editor, 2, 3);
-
-        editor.move_up();
-        assert_at(&editor, 1, 0);
-        editor.move_up();
-        assert_at(&editor, 0, 0);
-    }
-
-    #[test]
-    fn vertical_movement_does_not_wrap_a_long_line() {
-        // One logical line of 100 chars is still one line: Up from the line below must reach
-        // it, not a second visual row it would occupy if this module wrapped.
-        let long = "x".repeat(100);
-        let mut editor = editor(&format!("{long}\nshort"));
-
-        editor.move_up();
-        assert_at(&editor, 0, 5);
-        editor.move_up();
-        assert_at(&editor, 0, 5);
     }
 
     #[test]
@@ -844,7 +733,7 @@ mod tests {
     #[test]
     fn joins_and_splits_preserve_multibyte_text() {
         let mut editor = editor("aé\nb—");
-        editor.move_up();
+        editor.set_cursor(0, 2);
         editor.delete();
         assert_eq!(editor.text(), "aéb—");
 
@@ -870,7 +759,7 @@ mod tests {
     #[test]
     fn text_round_trips_after_a_mixed_edit_session() {
         let mut editor = editor("hello\nworld");
-        editor.move_up();
+        editor.set_cursor(0, 0);
         editor.insert_str(", ");
         editor.insert_newline();
         editor.insert_str("big ");
@@ -899,8 +788,6 @@ mod tests {
             editor.backspace();
             editor.move_left();
             editor.move_right();
-            editor.move_up();
-            editor.move_down();
             editor.delete();
         }
 
@@ -915,8 +802,6 @@ mod tests {
 
         editor.move_left();
         editor.move_left();
-        editor.move_up();
-        editor.move_down();
         editor.delete();
         editor.delete();
         editor.backspace();

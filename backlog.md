@@ -1,7 +1,7 @@
 ## Active
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
-- [ ] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
+- [>] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]

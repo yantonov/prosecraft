@@ -803,7 +803,7 @@ mod tests {
         let editor = editor("ab\n\nabcd");
         let rows = buffer_rows(&editor, 3);
 
-        assert_eq!(editor.line_count(), 3);
+        assert_eq!(editor.lines().len(), 3);
         assert_eq!(
             rows.iter()
                 .map(|row| (row.line, row.start))
