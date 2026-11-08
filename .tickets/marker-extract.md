@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 2
 deps: [pane-routing]
 attachments: []
 created: 2026-11-07T15:33:47Z
-updated: 2026-11-07T15:36:19Z
+updated: 2026-11-08T07:28:50Z
 ---
 # Marker extraction and error states
 

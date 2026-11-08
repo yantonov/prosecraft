@@ -24,6 +24,7 @@ mod cli;
 mod editor;
 mod harness;
 mod layout;
+mod marker;
 mod panes;
 mod process;
 mod ui;
