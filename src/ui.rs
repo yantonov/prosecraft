@@ -98,6 +98,12 @@ pub struct View<'a> {
     /// Kept apart from [`State`] because the word must stay one of three and this is free
     /// text that may be arbitrarily long.
     pub message: Option<String>,
+    /// Whether a key press changed something the frame shows, read and cleared by
+    /// [`View::tick`].
+    ///
+    /// The loop only redraws when a tick reports a change, so a key that is applied without
+    /// setting this never reaches the screen.
+    dirty: bool,
 }
 
 /// The clipboard is a trait object with no `Debug` of its own, so the view spells out what a
@@ -130,6 +136,7 @@ impl<'a> View<'a> {
             session: config.session_id.clone(),
             state: State::Idle,
             message: None,
+            dirty: false,
         }
     }
 
@@ -145,6 +152,9 @@ impl<'a> View<'a> {
         if key.kind != KeyEventKind::Press {
             return Outcome::Continue;
         }
+        // Set for every press, not per action: a missed action is a key that silently does
+        // nothing on screen.
+        self.dirty = true;
         if is_quit(*key) {
             return self.request_quit();
         }
@@ -375,14 +385,17 @@ impl<'a> View<'a> {
     /// One UI tick: drain the live run, settle it if it ended, and move the state word.
     ///
     /// Called once per tick by the event loop. Returns whether the view needs redrawing, which
-    /// it does when a line arrived or a run ended — a tick with nothing to report must not
-    /// cause a frame, or the batching rule in §6.1b would be pointless.
+    /// it does when a line arrived, a run ended, or a key changed something since the last
+    /// frame — a tick with nothing to report must not cause a frame, or the batching rule in
+    /// §6.1b would be pointless.
     pub fn tick(&mut self) -> bool {
+        // Taken, not read: the redraw a key earned belongs to the one frame after it.
+        let key_changed = std::mem::take(&mut self.dirty);
         let Some(machine) = self.machine.as_mut() else {
-            return false;
+            return key_changed;
         };
         match machine.tick(&mut self.stream) {
-            Tick::Idle => false,
+            Tick::Idle => key_changed,
             Tick::Streaming => true,
             Tick::Finished(settled) => {
                 self.state = match settled {
@@ -2264,6 +2277,83 @@ mod tests {
         let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
 
         assert!(!view.tick(), "an idle tick asked for a redraw");
+    }
+
+    /// A keystroke, `Tab` and `Ctrl+R` must each make the next tick ask for a redraw: the loop
+    /// draws only when a tick says so, so a key that is not reported never reaches the screen.
+    #[test]
+    fn a_key_press_makes_the_next_tick_ask_for_a_redraw() {
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+        view.source = Editor::from_text("");
+
+        view.handle_key(&press_char('h'));
+
+        assert_eq!(view.source.text(), "h");
+        assert!(
+            view.tick(),
+            "typing changed the pane and asked for no redraw"
+        );
+    }
+
+    #[test]
+    fn a_tab_press_asks_for_a_redraw() {
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+
+        view.handle_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(view.focus, Focus::Instructions, "Tab did not change focus");
+        assert!(view.tick(), "focus moved and asked for no redraw");
+    }
+
+    #[test]
+    fn a_started_rewrite_asks_for_a_redraw() {
+        // No line has arrived yet: the state word and the cleared output pane are the whole
+        // signal that Ctrl+R did something.
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+
+        view.handle_key(&ctrl_char('r'));
+
+        assert_eq!(view.state, State::Running, "Ctrl+R did not start a run");
+        assert!(view.tick(), "a started run asked for no redraw");
+    }
+
+    #[test]
+    fn a_refused_rewrite_asks_for_a_redraw() {
+        // The refusal text is the only feedback a refused Ctrl+R produces.
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+        view.instructions = Editor::from_text("  ");
+
+        view.handle_key(&ctrl_char('r'));
+
+        assert_eq!(view.state, State::Idle);
+        assert!(view.tick(), "a refusal was shown nowhere");
+    }
+
+    #[test]
+    fn a_key_release_does_not_ask_for_a_redraw() {
+        // Windows reports a release for every keystroke; redrawing on it would double the
+        // frames of every key.
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+
+        view.handle_key(&release);
+
+        assert!(!view.tick(), "a key release asked for a redraw");
+    }
+
+    #[test]
+    fn one_key_earns_exactly_one_redraw() {
+        // A flag that stayed set would redraw an idle app once per tick forever.
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+
+        view.handle_key(&press_char('h'));
+
+        assert!(view.tick(), "the key's redraw was lost");
+        assert!(!view.tick(), "the redraw was not spent on one frame");
     }
 
     #[test]

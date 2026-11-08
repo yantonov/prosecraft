@@ -1,10 +1,10 @@
 ## Active
-- [>] lzmlv #lzmlv
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
 - [x] Dummy empty TUI app #tui-dummy
 - [x] CLI args and startup validation #args-cli <- [tui-dummy]
+- [x] Keys are drawn only when a tick reports a change, so nothing typed shows #df6ic
 - [x] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
 - [x] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
 - [x] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]
@@ -21,6 +21,7 @@
 - [x] Makefile install target: release build, stamp git hash, copy to ~/.local/bin #zzfl3
 - [x] Wire Editor and wrap into the editable panes #editor-wiring <- [editor-wrap, pane-routing]
 - [x] Resolve where raw text goes when a marker is missing #spec-marker-fallback
+- [x] lzmlv #lzmlv
 - [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]

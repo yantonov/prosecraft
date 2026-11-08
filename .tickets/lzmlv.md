@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: []
 attachments: []
 created: 2026-11-08T10:45:48Z
-updated: 2026-11-08T10:45:52Z
+updated: 2026-11-08T10:46:11Z
+closed-at: 2026-11-08T10:46:11Z
 ---
 # lzmlv
 ## Description

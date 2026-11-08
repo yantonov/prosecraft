@@ -254,6 +254,42 @@ mod tests {
         }
     }
 
+    /// A key must reach the screen: `tick_loop` draws only when a tick asks, so a key applied
+    /// without being reported is invisible. Driven through the loop rather than by calling
+    /// `tick` directly, because that is where `handle_key` and `tick` meet.
+    #[test]
+    fn loop_draws_after_a_key_that_changes_the_view() {
+        let mut events = vec![
+            key(KeyCode::Char('h'), KeyModifiers::NONE, KeyEventKind::Press),
+            key(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ),
+        ]
+        .into_iter();
+
+        let mut view = view();
+        let mut draws = 0;
+        let result = tick_loop(
+            &mut view,
+            |_| {
+                draws += 1;
+                Ok(())
+            },
+            |view, _| {
+                let event = events.next().expect("tick_loop over-read its event source");
+                Ok(outcome_of(view, &event))
+            },
+            |view| view.tick(),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(view.source.text(), "h", "the key was not applied");
+        // The first frame, plus one for the typed character.
+        assert_eq!(draws, 2, "a keystroke was applied and never drawn");
+    }
+
     #[test]
     fn loop_keeps_running_until_a_press() {
         let mut events = vec![
