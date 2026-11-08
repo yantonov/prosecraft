@@ -1,4 +1,5 @@
 ## Active
+- [>] Drop Ctrl+Y: Ctrl+C is the only copy key #nxm5v
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]

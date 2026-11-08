@@ -221,15 +221,13 @@ impl<'a> View<'a> {
         }
         // The clipboard keys (spec §4). `Ctrl+V` is cursor-relative and respects focus, which
         // is the whole of the paste surface: pasting into a focused source pane replaces what
-        // is there, so no whole-pane replace key is needed alongside it.
+        // is there, so no whole-pane replace key is needed alongside it. `Ctrl+C` is the copy
+        // key and is handled above with the other chords, because a run in the debug pane
+        // gives it a second meaning.
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
                 KeyCode::Char('v') => {
                     self.paste();
-                    return Outcome::Continue;
-                }
-                KeyCode::Char('y') => {
-                    self.copy();
                     return Outcome::Continue;
                 }
                 KeyCode::Char('r') => {
@@ -511,7 +509,7 @@ impl<'a> View<'a> {
         }
     }
 
-    /// `Ctrl+Y`, and `Ctrl+C` outside the debug pane: copy the focused pane's text.
+    /// `Ctrl+C` in every pane but a running debug one: copy the focused pane's text.
     ///
     /// Works for the read-only panes as well as the editable ones, which is what makes the
     /// debug pane useful: its content can be taken somewhere else to read.
@@ -596,7 +594,7 @@ fn draw_toast(frame: &mut Frame, text: &str, area: Rect) {
 /// table, because this list is that table's only on-screen copy: a binding that is added there
 /// and forgotten here would be invisible to the user. The arrows are the spec's own glyphs, and
 /// they are also the widest cell in the column.
-const HELP_ROWS: [(&str, &str); 12] = [
+const HELP_ROWS: [(&str, &str); 11] = [
     ("Ctrl+R", "rewrite, or resend into the same session"),
     (
         "Ctrl+N",
@@ -613,7 +611,6 @@ const HELP_ROWS: [(&str, &str); 12] = [
     ("Tab / Shift+Tab", "cycle focus"),
     ("Ctrl+← / →", "switch column"),
     ("Ctrl+↑ / ↓", "switch row; no wrap"),
-    ("Ctrl+Y", "copy the focused pane"),
     ("Ctrl+V", "paste into an editable pane"),
     ("arrows", "move the cursor, or scroll"),
     ("PgUp / PgDn", "scroll by a page"),
@@ -2125,9 +2122,9 @@ mod tests {
         view.handle_key(&ctrl_char('v'));
         assert!(view.toast.is_some());
 
-        // `y` would normally copy; while a toast is up it only dismisses, so a user clearing
+        // `c` would normally copy; while a toast is up it only dismisses, so a user clearing
         // the note does not accidentally overwrite their clipboard.
-        view.handle_key(&ctrl_char('y'));
+        view.handle_key(&ctrl_char('c'));
         assert!(view.toast.is_none(), "the toast survived a key press");
         assert!(
             view.message.is_none(),
@@ -2136,42 +2133,40 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_y_copies_the_focused_pane() {
-        // The debug pane is the interesting case: copying from a read-only pane is what makes
-        // its content usable outside the app.
-        let (mut view, clipboard) =
-            clipboard_view_with(Focus::Debug, crate::clipboard::Recording::default());
-        view.stream.app("a debug line".to_owned());
+    fn ctrl_y_is_not_a_binding_and_leaves_every_pane_alone() {
+        // `Ctrl+C` is the copy key, so `Ctrl+Y` must be inert: nothing copied, nothing typed,
+        // no pane touched, and no cancel behind the user's back.
+        for focus in Focus::ALL {
+            let (view, _) = rewrite_view(focus, Vec::new(), None);
+            let (mut view, clipboard) = with_clipboard(view);
+            view.source = Editor::from_text("old");
+            view.instructions = Editor::from_text("also old");
+            view.stream.app("a debug line".to_owned());
 
-        view.handle_key(&ctrl_char('y'));
+            view.handle_key(&ctrl_char('y'));
 
-        let copied = clipboard
-            .written()
-            .expect("nothing was written to the clipboard");
-        assert!(
-            copied.contains("a debug line"),
-            "the debug pane's content was not copied: {copied:?}"
-        );
+            assert_eq!(clipboard.written(), None, "Ctrl+Y copied from {focus:?}");
+            assert_eq!(
+                view.source.text(),
+                "old",
+                "Ctrl+Y wrote to source at {focus:?}"
+            );
+            assert_eq!(
+                view.instructions.text(),
+                "also old",
+                "Ctrl+Y typed into instructions at {focus:?}"
+            );
+            assert_eq!(view.focus, focus, "Ctrl+Y moved focus from {focus:?}");
+            assert!(!view.cancel_armed, "Ctrl+Y armed a cancel at {focus:?}");
+        }
     }
 
     #[test]
-    fn ctrl_y_copies_the_source_pane_too() {
-        let (mut view, clipboard) =
-            clipboard_view_with(Focus::Source, crate::clipboard::Recording::default());
-        view.handle_key(&press_char('h'));
-        view.handle_key(&press_char('i'));
-
-        view.handle_key(&ctrl_char('y'));
-
-        assert_eq!(clipboard.written().as_deref(), Some("hi"));
-    }
-
-    #[test]
-    fn ctrl_y_on_an_empty_pane_says_so_and_writes_nothing() {
+    fn ctrl_c_on_an_empty_pane_says_so_and_writes_nothing() {
         let (mut view, clipboard) =
             clipboard_view_with(Focus::Source, crate::clipboard::Recording::default());
 
-        view.handle_key(&ctrl_char('y'));
+        view.handle_key(&ctrl_char('c'));
 
         assert_eq!(
             clipboard.written(),
@@ -2228,15 +2223,7 @@ mod tests {
         view.clipboard = Box::new(BrokenClipboard);
         view.source = Editor::from_text("keep me");
 
-        view.handle_key(&ctrl_char('v'));
-        assert_eq!(view.source.text(), "keep me");
-        assert_eq!(
-            view.message.as_deref(),
-            Some("clipboard unavailable"),
-            "a clipboard failure should be one readable sentence"
-        );
-
-        view.handle_key(&ctrl_char('y'));
+        view.handle_key(&ctrl_char('c'));
         assert_eq!(view.message.as_deref(), Some("clipboard unavailable"));
 
         // And the pane still edits, which is what "everything else works" means.

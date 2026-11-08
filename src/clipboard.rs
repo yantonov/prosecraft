@@ -1,7 +1,7 @@
 //! The system clipboard: the one piece of state outside the app (spec §1).
 //!
 //! The app reads the clipboard at startup for the initial source text and on demand for
-//! `Ctrl+V`, and writes it for `Ctrl+Y` (spec §4). That is the whole surface: no
+//! `Ctrl+V`, and writes it for `Ctrl+C` (spec §4). That is the whole surface: no
 //! config file, no session pointer, nothing else is persisted, which is why `Ctrl+N` is the
 //! only reset the app needs.
 //!
@@ -142,7 +142,7 @@ impl Clipboard for Disabled {
     }
 }
 
-/// Collects what `Ctrl+Y` wrote, so a test can assert on a copy without a clipboard.
+/// Collects what `Ctrl+C` wrote, so a test can assert on a copy without a clipboard.
 ///
 /// The state is shared, not owned: the view takes a `Box<dyn Clipboard>`, and a trait object
 /// cannot be downcast back to this type. Holding an `Rc` handle on the test side is the

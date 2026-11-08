@@ -116,7 +116,6 @@ Four panes, all focusable. Two columns, 50/50.
 | `Tab` / `Shift+Tab` | Cycle focus |
 | `Ctrl+←` / `Ctrl+→` | Switch column |
 | `Ctrl+↑` / `Ctrl+↓` | Switch row (source ↔ instructions, output ↔ debug); no wrap |
-| `Ctrl+Y` | Copy the focused pane's text to the clipboard (same as `Ctrl+C` outside a running debug pane) |
 | `Ctrl+V` | Paste the clipboard into the focused pane (editable panes only) |
 | arrow keys | Move cursor (editable) or scroll (read-only) |
 | `PgUp` / `PgDn` | Scroll by a page in the focused pane |
