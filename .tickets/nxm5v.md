@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: []
 attachments: []
 created: 2026-11-08T12:35:41Z
-updated: 2026-11-08T12:35:43Z
+updated: 2026-11-08T12:36:12Z
+closed-at: 2026-11-08T12:36:12Z
 ---
 # Drop Ctrl+Y: Ctrl+C is the only copy key
 

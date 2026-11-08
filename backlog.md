@@ -1,5 +1,4 @@
 ## Active
-- [>] Drop Ctrl+Y: Ctrl+C is the only copy key #nxm5v
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
@@ -29,6 +28,7 @@
 - [x] pi on Windows: deliver the prompt on stdin when the harness resolves to a batch shim #glrti <- [o4snh]
 - [x] Drop Ctrl+E: Ctrl+V on the focused pane is enough #drop-ctrl-e
 - [x] Ctrl+C copies; halting a run needs the debug pane and a confirmation #ctrl-c-copy
+- [x] Drop Ctrl+Y: Ctrl+C is the only copy key #nxm5v
 - [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
