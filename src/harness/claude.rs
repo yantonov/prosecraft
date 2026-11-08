@@ -14,7 +14,7 @@
 use std::hash::{BuildHasher, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{BuildError, Event, HarnessAdapter, Invocation, Task, prompt};
+use super::{BuildError, Event, HarnessAdapter, Invocation, Task, Transport, prompt};
 
 /// The claude harness as an adapter.
 ///
@@ -95,14 +95,21 @@ impl HarnessAdapter for Claude {
 
         // The separator, then the prompt as exactly one argument. Newlines and a leading
         // `-` survive because the element is never joined or re-split (spec §6).
+        //
+        // claude is refused the stdin transport rather than silently losing the prompt: the
+        // §6 exception exists because a Windows `pi` install is a batch shim, and claude
+        // resolves to a real `.exe` on every platform.
+        if task.transport != Transport::Argv {
+            return Err(BuildError(
+                "claude is only started with the prompt in argv (spec §6)".to_owned(),
+            ));
+        }
         args.push("--".to_owned());
         args.push(prompt(task));
 
         Ok(Invocation {
             program: self.name().to_owned(),
             args,
-            // Both harnesses take the prompt as an argument, so there is nothing to write
-            // to the child's stdin (spec §6).
             stdin: None,
         })
     }
@@ -505,6 +512,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Transport;
 
     fn task<'a>(instructions: &'a str, source_text: &'a str, model: Option<&'a str>) -> Task<'a> {
         Task {
@@ -512,6 +520,7 @@ mod tests {
             source_text,
             model,
             session: None,
+            transport: Transport::Argv,
         }
     }
 
@@ -536,6 +545,8 @@ mod tests {
         source_text: &'static str,
         model: Option<&'static str>,
         session: Option<&'static str>,
+        /// Where the prompt travels, so the shim row can be expressed as data.
+        transport: Transport,
         expected: &'static [&'static str],
     }
 
@@ -545,6 +556,7 @@ mod tests {
             source_text: row.source_text,
             model: row.model,
             session: row.session,
+            transport: row.transport,
         };
         harness()
             .build(&task)
@@ -554,6 +566,9 @@ mod tests {
     fn assert_row(row: &Row) {
         let invocation = build_row(row);
         assert_eq!(invocation.program, "claude", "{}: program", row.name);
+        // claude has no stdin form: the §6 exception is a Windows `pi` shim, and claude
+        // resolves to a real `.exe` everywhere. Asserted rather than assumed, because a
+        // silent switch would truncate the prompt instead of failing.
         assert_eq!(
             invocation.stdin, None,
             "{}: the prompt is an argument, not stdin",
@@ -571,6 +586,7 @@ mod tests {
             source_text: row.source_text,
             model: row.model,
             session: None,
+            transport: Transport::Argv,
         });
         let expected: Vec<String> = row
             .expected
@@ -606,6 +622,7 @@ mod tests {
             source_text: "hello",
             model: None,
             session: None,
+            transport: Transport::Argv,
             expected: &[
                 "-p",
                 "--session-id",
@@ -637,6 +654,7 @@ mod tests {
             source_text: "hello",
             model: None,
             session: Some("11111111-2222-4333-8444-555555555555"),
+            transport: Transport::Argv,
             expected: &[
                 "-p",
                 "--resume",
@@ -669,6 +687,7 @@ mod tests {
             source_text: "hello",
             model: Some("opus-4-5"),
             session: None,
+            transport: Transport::Argv,
             expected: &[
                 "-p",
                 "--session-id",
@@ -699,6 +718,7 @@ mod tests {
             source_text: "hello",
             model: Some("opus-4-5"),
             session: Some("11111111-2222-4333-8444-555555555555"),
+            transport: Transport::Argv,
             expected: &[
                 "-p",
                 "--resume",

@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::harness::{HarnessAdapter, Invocation, Task};
+use crate::harness::{HarnessAdapter, Invocation, Task, Transport};
 use crate::panes::{Settled, StreamState};
 use crate::process::{self, Line, Outcome};
 
@@ -121,6 +121,10 @@ pub struct Machine {
     /// `.exe`. Holding the resolved path here is what makes the startup check and the spawn
     /// the same answer rather than two guesses (spec §3).
     program: PathBuf,
+    /// Whether that program is a Windows batch shim, which cannot carry the prompt in argv.
+    /// Decided once by the resolver and passed along with the program, so the two facts about
+    /// the same file can never drift apart (spec §6).
+    batch: bool,
     spawner: Spawner,
     /// Wall-clock limit for each run. A field rather than a constant so a test can pass
     /// hundreds of milliseconds instead of waiting out the 180 s default (spec §7).
@@ -134,6 +138,7 @@ impl std::fmt::Debug for Machine {
             .field("session", &self.session)
             .field("harness", &self.adapter.name())
             .field("program", &self.program)
+            .field("batch", &self.batch)
             .finish()
     }
 }
@@ -143,12 +148,13 @@ impl Machine {
     ///
     /// `program` is the resolver's answer from startup: the concrete file to start, not the
     /// harness's name. Passing it in keeps this module free of any platform lookup rule.
-    pub fn new(adapter: Box<dyn HarnessAdapter>, program: PathBuf) -> Self {
+    pub fn new(adapter: Box<dyn HarnessAdapter>, program: PathBuf, batch: bool) -> Self {
         Self {
             child: None,
             session: None,
             adapter,
             program,
+            batch,
             spawner: Box::new(|invocation, timeout| {
                 process::Run::spawn_with_timeout(invocation, timeout)
                     .map(|run| Box::new(run) as Box<dyn Child>)
@@ -185,6 +191,7 @@ impl Machine {
             session: None,
             adapter,
             program,
+            batch: false,
             spawner,
             timeout: DEFAULT_TIMEOUT,
         }
@@ -253,6 +260,13 @@ impl Machine {
         // the argv at all.
         let built = Task {
             session: self.session.as_deref(),
+            // The machine owns this rather than the caller: it is a fact about the resolved
+            // program, and the caller has no resolution to consult (spec §6).
+            transport: if self.batch {
+                Transport::Stdin
+            } else {
+                Transport::Argv
+            },
             ..*task
         };
         let mut invocation = self
@@ -447,6 +461,7 @@ mod tests {
             source_text: source,
             model: None,
             session: None,
+            transport: Transport::Argv,
         }
     }
 
@@ -860,7 +875,11 @@ mod tests {
         // spawn could not start. The machine now starts the resolver's answer instead.
         let recorded = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let handed = recorded.clone();
-        let mut machine = Machine::new(Box::new(Claude), PathBuf::from("/opt/bin/claude.exe"));
+        let mut machine = Machine::new(
+            Box::new(Claude),
+            PathBuf::from("/opt/bin/claude.exe"),
+            false,
+        );
         machine.spawner = Box::new(move |invocation, _| {
             handed.borrow_mut().push(invocation.program.clone());
             Ok(Box::new(Scripted {
@@ -885,6 +904,68 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_harness_gets_the_prompt_on_stdin_and_an_exe_gets_it_in_argv() {
+        // The transport is a fact about the resolved program, so the machine decides it and
+        // the caller cannot pass the wrong one. Both halves are asserted, because "always
+        // stdin" would silently break every unix install.
+        fn program_and_stdin(batch: bool) -> (Vec<String>, Option<String>) {
+            let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let handed_seen = seen.clone();
+            let handed_captured = captured.clone();
+            let mut machine = Machine::new(
+                Box::new(crate::harness::pi::Pi),
+                PathBuf::from("pi.cmd"),
+                batch,
+            );
+            machine.spawner = Box::new(move |invocation, _| {
+                *handed_seen.borrow_mut() = invocation.args.clone();
+                *handed_captured.borrow_mut() = invocation.stdin.clone();
+                Ok(Box::new(Scripted {
+                    inner: std::rc::Rc::new(std::cell::RefCell::new(Fake::new(
+                        Vec::new(),
+                        Some(exited(0)),
+                    ))),
+                }) as Box<dyn Child>)
+            });
+            machine
+                .start(&task("formal", "text"), true, &mut stream(), Instant::now())
+                .expect("the machine refused a valid task");
+            let args = seen.borrow().clone();
+            let stdin = captured.borrow().clone();
+            (args, stdin)
+        }
+
+        let (shim_args, shim_stdin) = program_and_stdin(true);
+        assert!(
+            shim_stdin.is_some(),
+            "a batch shim must get the prompt on stdin"
+        );
+        assert!(
+            !shim_args.iter().any(|arg| arg == "--"),
+            "the shim argv must not carry the separator: {shim_args:?}"
+        );
+        assert!(
+            !shim_args.iter().any(|arg| arg == "--system-prompt"),
+            "the instructions cannot travel in argv on a shim: {shim_args:?}"
+        );
+
+        let (exe_args, exe_stdin) = program_and_stdin(false);
+        assert_eq!(exe_stdin, None, "an .exe must not get the prompt on stdin");
+        assert!(
+            exe_args.iter().any(|arg| arg == "--"),
+            "the argv form keeps the separator: {exe_args:?}"
+        );
+        assert!(exe_args.iter().any(|arg| arg == "--system-prompt"));
+        assert!(
+            exe_args
+                .last()
+                .is_some_and(|arg| arg.starts_with("INSTRUCTIONS:")),
+            "an .exe carries the prompt as its last argument: {exe_args:?}"
+        );
+    }
+
+    #[test]
     fn the_session_id_is_read_back_out_of_the_argv_it_was_written_into() {
         // The adapter generates the id inside `build` and reports it through the argv, so this
         // is the only place the machine can learn it (spec §6.2).
@@ -895,6 +976,7 @@ mod tests {
                 source_text: "text",
                 model: None,
                 session: None,
+                transport: Transport::Argv,
             },
         )
         .unwrap();

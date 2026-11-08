@@ -112,6 +112,7 @@ impl Tui {
         view.machine = Some(Box::new(rewrite::Machine::new(
             adapter_for(config.harness),
             config.harness_program.clone(),
+            config.harness_is_batch,
         )));
 
         // Ticking rather than blocking: a live rewrite delivers lines on the child's threads,
@@ -241,6 +242,7 @@ mod tests {
         let config = Box::leak(Box::new(Config {
             harness: cli::Harness::Claude,
             harness_program: std::path::PathBuf::from("stub-harness"),
+            harness_is_batch: false,
             model: None,
             session_id: None,
             initial_source: String::new(),

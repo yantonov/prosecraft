@@ -362,6 +362,7 @@ impl<'a> View<'a> {
             model: self.config.model.as_deref(),
             // The machine decides the session; the task carries only what the user typed.
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         // A binary that resolved at startup can disappear before a rewrite; §5 step 1 refuses
         // it here too rather than spawning and failing. The lookup is the same one startup
@@ -717,6 +718,7 @@ mod tests {
         Config {
             harness: Harness::Claude,
             harness_program: std::path::PathBuf::from("stub-harness"),
+            harness_is_batch: false,
             model: None,
             session_id: None,
             initial_source: "source text".to_owned(),
@@ -1633,6 +1635,7 @@ mod tests {
         let config = Box::leak(Box::new(Config {
             harness: Harness::Claude,
             harness_program: std::path::PathBuf::from("stub-harness"),
+            harness_is_batch: false,
             model: None,
             session_id: None,
             initial_source: text.to_owned(),
@@ -1832,6 +1835,7 @@ mod tests {
         let config = Box::leak(Box::new(Config {
             harness: Harness::Claude,
             harness_program: std::path::PathBuf::from("stub-harness"),
+            harness_is_batch: false,
             model: None,
             session_id: None,
             initial_source: String::new(),
@@ -2142,6 +2146,7 @@ mod tests {
         let config = Box::leak(Box::new(Config {
             harness: Harness::Claude,
             harness_program: std::path::PathBuf::from("stub-harness"),
+            harness_is_batch: false,
             model: None,
             session_id: None,
             initial_source: "source text".to_owned(),
@@ -2224,6 +2229,7 @@ mod tests {
         view.config = Box::leak(Box::new(Config {
             harness: Harness::Claude,
             harness_program: std::path::PathBuf::from("stub-harness"),
+            harness_is_batch: false,
             model: None,
             session_id: None,
             initial_source: String::new(),
@@ -2238,6 +2244,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         machine
             .start(&task, true, &mut view.stream, std::time::Instant::now())
@@ -2261,6 +2268,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2295,6 +2303,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2322,6 +2331,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2351,6 +2361,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2467,6 +2478,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2489,6 +2501,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2515,6 +2528,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2549,6 +2563,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2575,6 +2590,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2604,6 +2620,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2637,6 +2654,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2678,6 +2696,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2722,6 +2741,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2772,6 +2792,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2811,6 +2832,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()
@@ -2857,6 +2879,7 @@ mod tests {
             source_text: "text",
             model: None,
             session: None,
+            transport: crate::harness::Transport::Argv,
         };
         view.machine
             .as_mut()

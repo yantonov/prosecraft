@@ -32,6 +32,24 @@ pub struct Task<'a> {
     /// `None` means the first call of this run (spec §6.4): there is no session to
     /// continue. `Some` is the id of the session to resume.
     pub session: Option<&'a str>,
+    /// Where the prompt has to travel, decided by the resolution the machine holds.
+    ///
+    /// Not a per-adapter choice: the same pi binary takes the prompt in `argv` on unix and on
+    /// stdin on Windows when it is installed as a batch shim, because `cmd.exe` re-parses a
+    /// batch file's command line and no argument carrying a newline survives (spec §6).
+    pub transport: Transport,
+}
+
+/// How the prompt reaches the harness (spec §6).
+///
+/// Two variants and no default: an adapter that guessed would be right on one platform and
+/// silently truncate the prompt on the other, which is the failure this removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// The prompt is one element of `argv`, after a `--` separator.
+    Argv,
+    /// The prompt is written to the child's stdin; `argv` carries no `--` and no prompt.
+    Stdin,
 }
 
 /// One process invocation: the program, every argument after it, and what to write to the
@@ -43,8 +61,8 @@ pub struct Invocation {
     /// user prompt. Elements are never joined: a prompt containing a newline or a leading
     /// `-` survives only if it stays one element (spec §6).
     pub args: Vec<String>,
-    /// `None` means nothing is written to stdin, because both harnesses take the prompt as
-    /// an argument (spec §6).
+    /// `None` means nothing is written to stdin; `Some` is the prompt, which is how a Windows
+    /// batch shim receives it (spec §6). Exactly one of this and the prompt in `args` is set.
     pub stdin: Option<String>,
 }
 
@@ -159,6 +177,7 @@ mod tests {
             source_text,
             model: None,
             session: None,
+            transport: Transport::Argv,
         }
     }
 
@@ -218,6 +237,7 @@ mod tests {
 there",
                 model: None,
                 session: None,
+                transport: Transport::Argv,
             },
         )
         .unwrap();
@@ -229,6 +249,7 @@ there",
 there",
                 model: None,
                 session: Some("11111111-2222-4333-8444-555555555555"),
+                transport: Transport::Argv,
             },
         )
         .unwrap();

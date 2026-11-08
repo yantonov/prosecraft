@@ -34,14 +34,17 @@ use std::path::{Path, PathBuf};
 pub enum Resolved {
     /// The program to give to `Command::new`: the absolute path of the file that will
     /// actually be started.
-    Program { program: PathBuf },
+    Program {
+        program: PathBuf,
+        /// Whether the program is a Windows batch shim (`.cmd`/`.bat`).
+        ///
+        /// Load-bearing rather than informational: a batch file's command line is re-parsed by
+        /// `cmd.exe` and cannot carry a newline, so the prompt has to travel on stdin instead
+        /// of in `argv` (spec §6).
+        batch: bool,
+    },
     /// Nothing on this machine can run the harness.
     Missing,
-    /// The only candidate is a Windows batch shim, which this crate cannot drive yet.
-    ///
-    /// Separate from [`Resolved::Missing`] on purpose: an installation *is* present, and
-    /// telling the user to install something that is already installed would be wrong.
-    ShimUnsupported,
 }
 
 impl Resolved {
@@ -51,9 +54,14 @@ impl Resolved {
     /// keeps them from disagreeing.
     pub fn program(&self) -> Option<&Path> {
         match self {
-            Self::Program { program } => Some(program.as_path()),
-            Self::Missing | Self::ShimUnsupported => None,
+            Self::Program { program, .. } => Some(program.as_path()),
+            Self::Missing => None,
         }
+    }
+
+    /// Whether the prompt has to travel on stdin rather than in `argv` (spec §6).
+    pub fn needs_stdin_prompt(&self) -> bool {
+        matches!(self, Self::Program { batch: true, .. })
     }
 }
 
@@ -62,14 +70,10 @@ impl fmt::Display for Resolved {
     /// something or to stop using a platform.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // Reaching this with a name would mean the caller formatted a non-missing answer as
-            // an error; the message stays useful rather than panicking.
-            Self::Program { program } => write!(f, "`{}`", program.display()),
+            // Only `Missing` is ever formatted as a startup error; the `Program` arm keeps the
+            // impl total without claiming a runnable harness is a problem.
+            Self::Program { program, .. } => write!(f, "`{}`", program.display()),
             Self::Missing => f.write_str("not found on PATH"),
-            Self::ShimUnsupported => f.write_str(
-                "is only installed as a Windows batch shim (a runnable .exe is missing), \
-                 which this build cannot drive",
-            ),
         }
     }
 }
@@ -165,6 +169,7 @@ fn classify_file(path: &Path) -> Option<Resolved> {
     }
     Some(Resolved::Program {
         program: path.to_path_buf(),
+        batch: false,
     })
 }
 
@@ -184,8 +189,13 @@ fn classify_file(path: &Path) -> Option<Resolved> {
     match extension.as_deref() {
         Some("exe" | "com") => Some(Resolved::Program {
             program: path.to_path_buf(),
+            batch: false,
         }),
-        Some("cmd" | "bat") => Some(Resolved::ShimUnsupported),
+        // A batch file is a program the OS can start; it just needs its prompt elsewhere.
+        Some("cmd" | "bat") => Some(Resolved::Program {
+            program: path.to_path_buf(),
+            batch: true,
+        }),
         // A `.ps1`, an extensionless npm shim, or anything else: present but not a program
         // this crate can start, so keep looking for a candidate that is.
         _ => None,
@@ -379,10 +389,17 @@ mod tests {
         dir.write_plain("pi.cmd");
 
         let resolved = lookup_in(Some(&path_var(&[&dir])), Some(".COM;.EXE;.BAT;.CMD"), "pi");
-        assert_eq!(
-            resolved,
-            Resolved::ShimUnsupported,
-            "a batch shim must be reported, not returned as a program"
+        let program = resolved.program().expect("the shim is a program");
+        assert!(
+            program
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .ends_with("pi.cmd"),
+            "the .cmd shim was not selected: {resolved:?}"
+        );
+        assert!(
+            resolved.needs_stdin_prompt(),
+            "a batch shim cannot carry the prompt in argv (spec §6)"
         );
     }
 
@@ -406,7 +423,13 @@ mod tests {
         let path = dir.write_plain("pi.EXE");
 
         let resolved = lookup_in(Some(&path_var(&[&dir])), None, "pi");
-        assert_eq!(resolved, Resolved::Program { program: path });
+        assert_eq!(
+            resolved,
+            Resolved::Program {
+                program: path,
+                batch: false
+            }
+        );
     }
 
     #[cfg(windows)]
@@ -443,15 +466,31 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn a_batch_shim_is_never_reported_as_missing() {
-        // The message differs because the remedy does: nothing is left to install.
-        let missing = Resolved::Missing.to_string();
-        let shim = Resolved::ShimUnsupported.to_string();
-        assert_ne!(missing, shim);
+    fn only_a_batch_shim_needs_the_stdin_prompt() {
+        // The rule the adapter reads, asserted on both sides so it cannot silently become
+        // "always stdin" or "never stdin".
+        let dir = TempDir::new("stdin-rule");
+        dir.write_plain("pi.exe");
+        dir.write_plain("other.cmd");
+
+        let exe = lookup_in(Some(&path_var(&[&dir])), None, "pi");
         assert!(
-            shim.contains("batch shim"),
-            "the shim message must name what is wrong: {shim}"
+            !exe.needs_stdin_prompt(),
+            "an .exe carries the prompt in argv"
         );
+
+        let shim = lookup_in(Some(&path_var(&[&dir])), None, "other");
+        assert!(shim.needs_stdin_prompt(), "a .cmd shim cannot");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_never_needs_the_stdin_prompt() {
+        let dir = TempDir::new("no-stdin");
+        dir.write_binary("pi");
+
+        assert!(!lookup_in(Some(&path_var(&[&dir])), None, "pi").needs_stdin_prompt());
     }
 }

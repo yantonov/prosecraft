@@ -19,7 +19,7 @@
 //! and a second reader would be a second place for a parsing bug to live.
 
 use super::claude::parse as parse_json;
-use super::{BuildError, Event, HarnessAdapter, Invocation, Task, prompt};
+use super::{BuildError, Event, HarnessAdapter, Invocation, Task, Transport, prompt};
 
 /// The pi harness as an adapter.
 ///
@@ -77,8 +77,16 @@ impl HarnessAdapter for Pi {
 
         // Replaces pi's agent prompt. With every tool, skill, extension and context file
         // disabled that prompt has nothing left to do, so replacing it is correct.
-        args.push("--system-prompt".to_owned());
-        args.push(task.instructions.to_owned());
+        //
+        // Dropped on a batch shim: this flag carries the instructions pane, which is free text
+        // and therefore may contain a newline, and `cmd.exe` cannot pass one as an argument
+        // (measured: `InvalidInput: batch file arguments are invalid`). Nothing is lost,
+        // because §6.0 already makes the flag register-only — the instructions travel in the
+        // user turn, which on a shim is the stdin prompt.
+        if task.transport == Transport::Argv {
+            args.push("--system-prompt".to_owned());
+            args.push(task.instructions.to_owned());
+        }
 
         // The denial block. `--no-context-files` is load-bearing and is the one flag here
         // whose absence is invisible: measured, without it pi injects the user's own
@@ -98,16 +106,26 @@ impl HarnessAdapter for Pi {
             args.push(flag.to_owned());
         }
 
-        // The separator, then the prompt as exactly one argument, so newlines and a leading
-        // `-` survive without quoting (spec §6).
-        args.push("--".to_owned());
-        args.push(prompt(task));
+        // Either the prompt is one argv element, or it goes to stdin and `argv` stays free of
+        // both it and the separator. Never a lone `--`: a separator with nothing after it is
+        // an invitation for pi to read a prompt from somewhere else.
+        let stdin = match task.transport {
+            Transport::Argv => {
+                // The separator, then the prompt as exactly one argument, so newlines and a
+                // leading `-` survive without quoting (spec §6).
+                args.push("--".to_owned());
+                args.push(prompt(task));
+                None
+            }
+            // Measured verbatim through a `pi.cmd` shim: one assistant `message_end`, and the
+            // user turn carries every newline and both markers intact.
+            Transport::Stdin => Some(prompt(task)),
+        };
 
         Ok(Invocation {
             program: self.name().to_owned(),
             args,
-            // pi takes the prompt as an argument, so nothing is written to stdin.
-            stdin: None,
+            stdin,
         })
     }
 
@@ -182,6 +200,7 @@ impl HarnessAdapter for Pi {
 mod tests {
     use super::*;
     use crate::harness::HarnessAdapter;
+    use crate::harness::Transport;
 
     fn harness() -> Pi {
         Pi
@@ -193,6 +212,7 @@ mod tests {
             source_text,
             model,
             session: None,
+            transport: Transport::Argv,
         }
     }
 
@@ -202,6 +222,8 @@ mod tests {
         name: &'static str,
         model: Option<&'static str>,
         session: Option<&'static str>,
+        /// Where the prompt travels, so the shim row can be expressed as data.
+        transport: Transport,
         expected: &'static [&'static str],
     }
 
@@ -211,17 +233,27 @@ mod tests {
             source_text: "hello",
             model: row.model,
             session: row.session,
+            transport: row.transport,
         };
         let invocation = harness()
             .build(&task)
             .unwrap_or_else(|err| panic!("{}: build failed: {err}", row.name));
 
         assert_eq!(invocation.program, "pi", "{}: program", row.name);
-        assert_eq!(
-            invocation.stdin, None,
-            "{}: the prompt is an argument, not stdin",
-            row.name
-        );
+        // Exactly one transport carries the prompt, and the row says which (spec §6).
+        match row.transport {
+            Transport::Argv => assert_eq!(
+                invocation.stdin, None,
+                "{}: the prompt is an argument, not stdin",
+                row.name
+            ),
+            Transport::Stdin => assert_eq!(
+                invocation.stdin.as_deref(),
+                Some(prompt(&task).as_str()),
+                "{}: the prompt did not reach stdin",
+                row.name
+            ),
+        }
 
         // The session id is generated on a first call, so the expected vector carries `{id}`
         // and `{prompt}` and those two elements are checked against the generated values.
@@ -231,6 +263,7 @@ mod tests {
             source_text: "hello",
             model: row.model,
             session: None,
+            transport: row.transport,
         });
         let expected: Vec<String> = row
             .expected
@@ -258,6 +291,7 @@ mod tests {
             name: "first call, no --model",
             model: None,
             session: None,
+            transport: Transport::Argv,
             expected: &[
                 "--print",
                 "--session-id",
@@ -285,6 +319,7 @@ mod tests {
             name: "first call with --model",
             model: Some("opus-4-5"),
             session: None,
+            transport: Transport::Argv,
             expected: &[
                 "--print",
                 "--session-id",
@@ -308,6 +343,60 @@ mod tests {
         });
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_shim_gets_the_prompt_on_stdin_and_no_separator() {
+        // Measured on a real `pi.cmd`: any argument carrying a newline fails with
+        // `InvalidInput: batch file arguments are invalid`, and the template always has
+        // newlines. So the shim form drops `--system-prompt` (its value is the instructions
+        // pane, also free text) and sends the prompt on stdin instead (spec §6).
+        assert_row(&Row {
+            name: "batch shim, no --system-prompt, prompt on stdin",
+            model: None,
+            session: None,
+            transport: Transport::Stdin,
+            expected: &[
+                "--print",
+                "--session-id",
+                "{id}",
+                "--mode",
+                "json",
+                "--no-tools",
+                "--no-context-files",
+                "--no-extensions",
+                "--no-mcp",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--offline",
+            ],
+        });
+
+        let task = Task {
+            instructions: "be formal",
+            source_text: "hello",
+            model: None,
+            session: None,
+            transport: Transport::Stdin,
+        };
+        let invocation = harness().build(&task).expect("the shim form must build");
+
+        assert!(
+            !invocation.args.iter().any(|arg| arg == "--"),
+            "a lone -- invites pi to read a prompt from elsewhere: {:?}",
+            invocation.args
+        );
+        assert!(
+            !invocation.args.iter().any(|arg| arg == "be formal"),
+            "the instructions cannot travel in argv on a shim: {:?}",
+            invocation.args
+        );
+        assert_eq!(
+            invocation.stdin.as_deref(),
+            Some(prompt(&task).as_str()),
+            "the prompt must be the whole stdin payload"
+        );
+    }
+
     #[test]
     fn a_continuation_produces_the_identical_argv_apart_from_the_id() {
         // Spec §6.3: pi's `--session-id` means "open it or create it", so there is no branch
@@ -319,6 +408,7 @@ mod tests {
                 source_text: "hello",
                 model: None,
                 session: None,
+                transport: Transport::Argv,
             })
             .unwrap();
         let next = harness()
@@ -327,6 +417,7 @@ mod tests {
                 source_text: "hello",
                 model: None,
                 session: Some(id),
+                transport: Transport::Argv,
             })
             .unwrap();
 
@@ -603,6 +694,7 @@ mod tests {
             source_text: "hello",
             model: None,
             session: Some("id-in-use"),
+            transport: Transport::Argv,
         };
         let claude = crate::harness::claude::Claude.build(&resumed).unwrap();
         let pi = harness().build(&resumed).unwrap();

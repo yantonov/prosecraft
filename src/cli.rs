@@ -123,6 +123,9 @@ pub struct Config {
     /// The program the harness resolved to at startup. Carried rather than looked up again so
     /// the startup check and every later spawn are the same answer by construction (spec §3).
     pub harness_program: PathBuf,
+    /// Whether that program is a Windows batch shim, which needs the prompt on stdin
+    /// (spec §6). Carried beside the program so the two cannot drift.
+    pub harness_is_batch: bool,
     pub model: Option<String>,
     /// `None` until the first rewrite creates a session (spec §5). The status line shows an
     /// em-dash while it is absent, which is why this is not defaulted to an empty string.
@@ -196,6 +199,7 @@ pub fn assemble(
     let Some(harness_program) = resolved.program() else {
         return Err(Error::HarnessMissing(args.harness, resolved));
     };
+    let harness_is_batch = resolved.needs_stdin_prompt();
     let harness_program = harness_program.to_path_buf();
 
     // Read exactly once, here. `Config` holds the text, not the path, so nothing later
@@ -219,6 +223,7 @@ pub fn assemble(
     Ok(Config {
         harness: args.harness,
         harness_program,
+        harness_is_batch,
         model: args.model,
         // Created lazily on the first `Ctrl+R`; startup never starts a session.
         session_id: None,
@@ -308,6 +313,7 @@ mod tests {
     fn found(_: &str) -> resolve::Resolved {
         resolve::Resolved::Program {
             program: PathBuf::from("stub-harness"),
+            batch: false,
         }
     }
 
@@ -676,6 +682,7 @@ mod tests {
             valid(&["prosecraft", "--harness", "claude"]),
             |_| resolve::Resolved::Program {
                 program: path.clone(),
+                batch: false,
             },
             &mut crate::clipboard::Recording::default(),
         )
@@ -686,46 +693,40 @@ mod tests {
 
     #[test]
     fn a_resolution_without_a_program_refuses_startup() {
-        // Both non-spawnable answers take the same exit path, and the message says which.
-        for resolution in [
-            resolve::Resolved::Missing,
-            resolve::Resolved::ShimUnsupported,
-        ] {
-            let (result, reads) =
-                assemble_args(&["prosecraft", "--harness", "pi"], |_| resolution.clone());
+        let (result, reads) = assemble_args(&["prosecraft", "--harness", "pi"], |_| {
+            resolve::Resolved::Missing
+        });
 
-            match result.unwrap_err() {
-                Error::HarnessMissing(harness, reason) => {
-                    assert_eq!(harness, Harness::Pi);
-                    assert_eq!(reason, resolution);
-                }
-                other => panic!("expected HarnessMissing, got {other:?}"),
+        match result.unwrap_err() {
+            Error::HarnessMissing(harness, reason) => {
+                assert_eq!(harness, Harness::Pi);
+                assert_eq!(reason, resolve::Resolved::Missing);
             }
-            // Refused before the clipboard was touched, exactly like a missing binary.
-            assert_eq!(reads, 0, "a refusal must not read the clipboard");
+            other => panic!("expected HarnessMissing, got {other:?}"),
         }
+        // Refused before the clipboard was touched, exactly like a missing binary.
+        assert_eq!(reads, 0, "a refusal must not read the clipboard");
     }
 
+    #[cfg(windows)]
     #[test]
-    fn a_batch_shim_is_reported_as_present_but_undrivable() {
-        // The message is what the user acts on: telling someone to install a harness they
-        // already have would send them the wrong way.
-        let err = Error::HarnessMissing(Harness::Pi, resolve::Resolved::ShimUnsupported);
-        let rendered = err.to_string();
+    fn a_batch_shim_starts_instead_of_being_refused() {
+        // The shim is a program the OS can start (spec §6), so it must not take the missing
+        // path: only the prompt's transport changes, and that is the adapter's business.
+        let dir = TempDir::new("shim-accepted");
+        let shim = dir.write("pi.cmd", "@echo off");
 
-        assert!(
-            rendered.contains("`pi`"),
-            "the binary is not named: {rendered}"
-        );
-        assert!(
-            rendered.contains("batch shim"),
-            "the reason is not explained: {rendered}"
-        );
-        assert!(
-            !rendered.contains("not found on PATH"),
-            "a present harness must not be reported as absent: {rendered}"
-        );
-        assert_eq!(rendered.lines().count(), 1, "spec §3 asks for one line");
+        let config = assemble(
+            valid(&["prosecraft", "--harness", "pi"]),
+            |_| resolve::Resolved::Program {
+                program: shim.clone(),
+                batch: true,
+            },
+            &mut crate::clipboard::Recording::default(),
+        )
+        .expect("a batch shim must not be refused at startup");
+
+        assert_eq!(config.harness_program, shim);
     }
 
     #[test]

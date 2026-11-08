@@ -189,6 +189,7 @@ struct Invocation {
     program: String,
     args: Vec<String>,
     stdin: Option<String>, // None => prompt passed as an argument
+                           // Some => prompt written to stdin (Windows batch shims only, §6)
 }
 
 trait Harness {
@@ -210,6 +211,30 @@ maps to `Junk` — never an error — so an unknown event type cannot abort a ru
 
 Both harnesses take the prompt as an argument rather than stdin: prompts may contain
 `-` and quoting is one implementation instead of two.
+
+**Windows exception, measured.** The `pi` installation on Windows is an npm shim: a
+`pi.cmd` batch file, with no `pi.exe`. A batch file's command line is re-parsed by
+`cmd.exe`, and no argument carrying a newline reaches it at all — measured against the real
+template, `spawn` fails with `InvalidInput: batch file arguments are invalid`, and going
+through `cmd /c` instead truncates the prompt at the first newline. Since the prompt
+template always contains newlines, argv cannot be the transport on that platform.
+
+On stdin the same prompt round-trips verbatim through the shim (measured: one assistant
+`message_end`, `agent_end` shows every newline and both markers intact). So, **only when
+the resolved program is a Windows batch shim**, the prompt is written to stdin and no
+positional prompt or `--` separator is passed. On unix, on macOS, and for claude anywhere,
+the argv is unchanged and remains the transport. This is a per-platform rule, not a second
+transport: the adapter asks the resolution, and there is no other caller.
+
+The same limit applies to `--system-prompt`, which carries the instructions pane and
+therefore the same free text: measured, a newline there also fails with `InvalidInput`.
+That flag is dropped on a shim, which costs nothing because §6.0 already establishes that
+it is passed for register only and correctness never depends on it — the instructions
+travel in the user turn, which on a shim means the stdin prompt.
+
+Consequence for `Task`: an adapter cannot hardcode "the prompt is an argument", so `build`
+receives the resolution (see §3) and the prompt's transport is a property of the harness on
+that OS, not of the harness.
 
 ### 6.0 Measured constraint: system prompt flags do not survive resume
 

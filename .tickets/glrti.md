@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 2
 deps: [o4snh]
 attachments: []
 created: 2026-11-08T11:30:39Z
-updated: 2026-11-08T11:31:04Z
+updated: 2026-11-08T11:45:28Z
+closed-at: 2026-11-08T11:45:28Z
 ---
 # pi on Windows: deliver the prompt on stdin when the harness resolves to a batch shim
 
@@ -71,3 +72,41 @@ argv is then identical on both platforms apart from the omission of `--` and the
 ## Blocked on
 
 Human approval to amend spec §6. Do not start before it.
+
+## Done
+
+Spec §6 amended (with approval): the argv-only sentence now carries a **Windows exception**
+paragraph explaining why a batch shim cannot take the prompt in argv, what is measured, and
+that unix/macOS/claude argv is unchanged. `Invocation.stdin`'s comment in the struct sketch
+records the two meanings.
+
+Implementation:
+
+- `Resolved` lost `ShimUnsupported` and gained `Program { program, batch }`; a batch shim is
+  now a *supported* program. `needs_stdin_prompt()` is the one predicate, so `cli::assemble`
+  and `Machine` read the same fact.
+- `Task` gained `transport: Transport::{Argv, Stdin}`, decided by `Machine` from `batch` and
+  never by the caller, because it is a fact about the resolved program.
+- pi adapter: on `Stdin` it omits `--system-prompt` **and** the `--` separator, and sets
+  `stdin` to the prompt. Measuring turned up the `--system-prompt` half: the instructions
+  pane is free text, and a newline there fails the same way (`InvalidInput`). Dropping it
+  costs nothing because §6.0 already makes it register-only.
+- claude adapter returns `BuildError` on a non-argv transport rather than silently losing
+  the prompt. It resolves to a real `.exe` on every platform, so this is a guard, not a path.
+- `Config` carries `harness_is_batch` beside `harness_program`.
+
+Verified live on this machine through the real `pi.cmd`, with the exact argv the adapter now
+produces (prompt on stdin, no `--`, no `--system-prompt`):
+
+    exit 0
+    terminal message_end: :"<<<TEXT>>>Good day. How are you?<<<END>>>"
+    prompt arrived verbatim on stdin: true
+
+And `./target/debug/prosecraft.exe --harness pi --no-clipboard` now opens the TUI instead of
+exiting 1 — the refusal from [[o4snh]] is gone because a shim is no longer undrivable.
+
+Tests: 424 unit + 7 integration. `make check` green.
+
+Not done: no live `Ctrl+R`-in-the-TUI run was captured — the fixture-level round trip above
+plus the machine-level transport test cover the same argv, but the manual script in spec §10
+has not been walked for pi on Windows.
