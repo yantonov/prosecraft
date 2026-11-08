@@ -1,5 +1,4 @@
 ## Active
-- [>] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
 - [ ] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
@@ -18,6 +17,7 @@
 - [x] Output pane from final text, debug pane from stream #pane-routing <- [editor-wrap, process-spawn]
 - [x] Process spawn and stream readers #process-spawn <- [harness-trait]
 - [x] Rewrite validation and state machine #rewrite-flow <- [clipboard, marker-extract]
+- [x] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
 - [x] Editor wrapping: soft-wrap rendering and wrap-aware movement #editor-wrap <- [editor-widget]
 - [x] Apache 2.0 licence: Yury Antonov, 2026 #license-apache <- [tui-dummy]
 - [x] Makefile install target: release build, stamp git hash, copy to ~/.local/bin #zzfl3

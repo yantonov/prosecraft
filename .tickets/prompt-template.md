@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: [rewrite-flow]
 attachments: []
 created: 2026-11-07T15:33:50Z
-updated: 2026-11-08T08:30:48Z
+updated: 2026-11-08T08:32:28Z
+closed-at: 2026-11-08T08:32:28Z
 ---
 # Prompt template and instruction delivery
 
