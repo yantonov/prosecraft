@@ -127,27 +127,6 @@ pub struct Config {
     pub initial_instructions: String,
 }
 
-/// Reads the system clipboard at startup.
-///
-/// A trait rather than a direct call so the clipboard ticket can plug in a real reader
-/// without moving any of the precedence logic, and so tests can prove whether the
-/// clipboard was consulted at all.
-pub trait ClipboardRead {
-    /// Returns the clipboard text, or `None` when it is empty or unavailable.
-    fn read_text(&mut self) -> Option<String>;
-}
-
-/// Placeholder used until the clipboard ticket lands: it never touches the system
-/// clipboard, so startup has no side effects beyond the files named on the command line.
-#[derive(Debug, Default)]
-pub struct PlaceholderClipboard;
-
-impl ClipboardRead for PlaceholderClipboard {
-    fn read_text(&mut self) -> Option<String> {
-        None
-    }
-}
-
 /// A startup failure that is not command-line misuse. Misuse is clap's exit code 2; these
 /// are runtime failures of an otherwise valid invocation, so they exit 1.
 #[derive(Debug)]
@@ -204,7 +183,7 @@ impl std::error::Error for Error {
 pub fn assemble(
     args: Args,
     lookup: impl Fn(&str) -> bool,
-    clipboard: &mut impl ClipboardRead,
+    clipboard: &mut impl crate::clipboard::Clipboard,
 ) -> Result<Config, Error> {
     // Before the file reads: a missing harness is the more fundamental problem, and the
     // spec forbids opening the UI in that case, so its error must win.
@@ -225,7 +204,9 @@ pub fn assemble(
         (Some(text), _) => text.clone(),
         (None, Some(path)) => read_text_file("--text-file", path)?,
         (None, None) if args.no_clipboard => String::new(),
-        (None, None) => clipboard.read_text().unwrap_or_default(),
+        // An unavailable or empty clipboard leaves the pane empty rather than failing
+        // startup: spec §8 makes this a status-line warning with everything else working.
+        (None, None) => clipboard.get_text().ok().flatten().unwrap_or_default(),
     };
 
     Ok(Config {
@@ -385,35 +366,13 @@ mod tests {
         false
     }
 
-    #[derive(Default)]
-    struct RecordingClipboard {
-        text: Option<String>,
-        reads: usize,
-    }
-
-    impl RecordingClipboard {
-        fn with(text: &str) -> Self {
-            Self {
-                text: Some(text.to_owned()),
-                reads: 0,
-            }
-        }
-    }
-
-    impl ClipboardRead for RecordingClipboard {
-        fn read_text(&mut self) -> Option<String> {
-            self.reads += 1;
-            self.text.clone()
-        }
-    }
-
     fn assemble_args(
         argv: &[&str],
         lookup: impl Fn(&str) -> bool,
     ) -> (Result<Config, Error>, usize) {
-        let mut clipboard = RecordingClipboard::with("clipboard text");
+        let mut clipboard = crate::clipboard::Recording::with("clipboard text");
         let result = assemble(valid(argv), lookup, &mut clipboard);
-        (result, clipboard.reads)
+        (result, clipboard.reads())
     }
 
     #[test]
@@ -509,7 +468,7 @@ mod tests {
     fn harness_lookup_receives_the_binary_name_of_the_selected_harness() {
         let seen = std::cell::Cell::new(None);
         let args = valid(&["prosecraft", "--harness", "pi"]);
-        let mut clipboard = RecordingClipboard::default();
+        let mut clipboard = crate::clipboard::Recording::default();
         let config = assemble(
             args,
             |binary| {
@@ -690,7 +649,7 @@ mod tests {
 
     #[test]
     fn empty_clipboard_starts_with_an_empty_source() {
-        let mut clipboard = RecordingClipboard::default();
+        let mut clipboard = crate::clipboard::Recording::default();
         let config = assemble(
             valid(&["prosecraft", "--harness", "claude"]),
             found,
@@ -743,7 +702,7 @@ mod tests {
             "--text",
             "source",
         ]);
-        let config = assemble(args, found, &mut RecordingClipboard::default()).unwrap();
+        let config = assemble(args, found, &mut crate::clipboard::Recording::default()).unwrap();
 
         assert_eq!(config.model.as_deref(), Some("opus"));
         assert_eq!(config.initial_instructions, "instructions");

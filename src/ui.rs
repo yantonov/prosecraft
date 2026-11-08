@@ -4,6 +4,8 @@
 //! Content is placeholder text for now: the editor ticket owns buffers and the wrap ticket
 //! owns wrapping, so this module only has to give each pane the right inner rectangle.
 
+use std::fmt;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -12,6 +14,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Paragraph};
 
 use crate::cli::Config;
+use crate::clipboard::Clipboard;
 use crate::editor::Editor;
 use crate::layout::{self, Focus};
 use crate::panes::StreamState;
@@ -62,8 +65,10 @@ pub enum Outcome {
     Quit,
 }
 
-/// Everything the frame needs that is not geometry. `Debug` so tests can build a fixed one.
-#[derive(Debug, Clone)]
+/// Everything the frame needs that is not geometry.
+///
+/// Not `Clone`: the clipboard is a trait object holding a live display connection on some
+/// platforms, and a cloned view would have two handles to one clipboard.
 pub struct View<'a> {
     pub config: &'a Config,
     pub focus: Focus,
@@ -77,12 +82,33 @@ pub struct View<'a> {
     /// Content and scroll state of the output and debug panes (spec §5, §6.1b). Owned here
     /// rather than borrowed because the stream writes into it while the view is alive.
     pub stream: StreamState,
+    /// The system clipboard (spec §4). A trait object rather than a generic parameter so the
+    /// view keeps one type: a generic would ripple through every function that takes a
+    /// `&mut View`, and nothing here needs the monomorphised speed.
+    pub clipboard: Box<dyn Clipboard>,
+    /// A one-shot note drawn over the focused pane, dismissed by any key. Used for the
+    /// read-only paste refusal, which is the only thing that needs to interrupt without
+    /// changing the status line.
+    pub toast: Option<String>,
     pub state: State,
     /// One-line note beside the state word: validation text, an error, the quit prompt, or
     /// how the last run ended (a cancelled rewrite returns to `Idle` with its note here).
     /// Kept apart from [`State`] because the word must stay one of three and this is free
     /// text that may be arbitrarily long.
     pub message: Option<String>,
+}
+
+/// The clipboard is a trait object with no `Debug` of its own, so the view spells out what a
+/// reader needs: where focus is, what state the panes are in, and whether a toast is showing.
+impl fmt::Debug for View<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("View")
+            .field("focus", &self.focus)
+            .field("state", &self.state)
+            .field("message", &self.message)
+            .field("toast", &self.toast)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> View<'a> {
@@ -95,6 +121,8 @@ impl<'a> View<'a> {
             instructions: Editor::from_text(&config.initial_instructions),
             instructions_wrap: WrapState::new(),
             stream: StreamState::new(),
+            clipboard: Box::new(crate::clipboard::Disabled),
+            toast: None,
             state: State::Idle,
             message: None,
         }
@@ -117,6 +145,32 @@ impl<'a> View<'a> {
         }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             return self.interrupt();
+        }
+        // A toast is the first thing any key dismisses, and it must not also do its own
+        // action: pressing `y` to get rid of "this pane is read-only" should not then start
+        // copying. So the dismissal eats the key and returns.
+        if self.toast.is_some() {
+            self.toast = None;
+            return Outcome::Continue;
+        }
+        // The clipboard keys (spec §4). Distinct on purpose: Ctrl+V is cursor-relative and
+        // respects focus, Ctrl+E is a whole-pane replace that always targets source.
+        if key.modifiers == KeyModifiers::CONTROL {
+            match key.code {
+                KeyCode::Char('v') => {
+                    self.paste();
+                    return Outcome::Continue;
+                }
+                KeyCode::Char('y') => {
+                    self.copy();
+                    return Outcome::Continue;
+                }
+                KeyCode::Char('e') => {
+                    self.load_into_source();
+                    return Outcome::Continue;
+                }
+                _ => {}
+            }
         }
         // Editing and moving in an editable pane come before focus routing, because the same
         // key means different things either side of it: Tab changes focus, a character types.
@@ -225,6 +279,79 @@ impl<'a> View<'a> {
         }
     }
 
+    /// `Ctrl+V`: paste the clipboard into the focused pane, at the cursor.
+    ///
+    /// A read-only pane has no cursor to insert at, so the paste is refused with a toast rather
+    /// than silently ignored: the user pressed a key and deserves to know why nothing happened.
+    fn paste(&mut self) {
+        if !self.focus.is_editable() {
+            // Spec §4: `Ctrl+V` is editable-panes-only. The toast is the whole UI for this,
+            // deliberately not a modal framework for one case.
+            self.toast = Some(format!("{} is read-only", self.focus.title()));
+            return;
+        }
+        match self.clipboard.get_text() {
+            Ok(Some(text)) if !text.is_empty() => {
+                // A multi-line paste arrives with newlines, and `insert_char` routes those to
+                // `insert_newline`, so pasted prose lands as real lines rather than one long
+                // row. Invalid UTF-8 was already made lossy when it was read.
+                if let Some((editor, _)) = self.editable(self.focus) {
+                    for c in text.chars() {
+                        editor.insert_char(c);
+                    }
+                }
+                self.message = None;
+            }
+            // An empty clipboard must never wipe a pane, so it is a note and nothing else.
+            Ok(_) => self.message = Some("clipboard is empty".to_owned()),
+            Err(err) => self.message = Some(failure(&err)),
+        }
+    }
+
+    /// `Ctrl+Y`: copy the focused pane's text.
+    ///
+    /// Works for the read-only panes as well as the editable ones, which is what makes the
+    /// debug pane useful: its content can be taken somewhere else to read.
+    fn copy(&mut self) {
+        let text = match self.focus {
+            Focus::Source => self.source.lines().join(
+                "
+",
+            ),
+            Focus::Instructions => self.instructions.lines().join(
+                "
+",
+            ),
+            Focus::Output => self.stream.output_text(),
+            Focus::Debug => self.stream.debug_text(),
+        };
+        if text.is_empty() {
+            self.message = Some(format!("{} is empty", self.focus.title()));
+            return;
+        }
+        match self.clipboard.set_text(&text) {
+            Ok(()) => self.message = Some(format!("copied {}", self.focus.title())),
+            Err(err) => self.message = Some(failure(&err)),
+        }
+    }
+
+    /// `Ctrl+E`: replace the source pane with the clipboard, and show that it happened.
+    ///
+    /// Always the source pane whatever has focus (spec §4 says so explicitly), and focus moves
+    /// there afterwards, because a replacement the user cannot see is indistinguishable from
+    /// nothing happening.
+    fn load_into_source(&mut self) {
+        match self.clipboard.get_text() {
+            Ok(Some(text)) if !text.is_empty() => {
+                self.source = Editor::from_text(&text);
+                self.focus = Focus::Source;
+                self.message = None;
+            }
+            Ok(_) => self.message = Some("clipboard is empty".to_owned()),
+            Err(err) => self.message = Some(failure(&err)),
+        }
+    }
+
     /// The editor and wrap state of one editable pane, mutably.
     ///
     /// A pair rather than a merged type: the buffer is logical and width-free, the wrap state
@@ -248,9 +375,34 @@ pub fn render(frame: &mut Frame, view: &mut View) {
             draw_pane(frame, view, &panes, focus, area);
         }
     }
+    // Drawn after the panes and before the status line, so a toast covers the focused pane but
+    // can never hide the harness name or the state word.
+    if let Some(toast) = &view.toast {
+        draw_toast(frame, toast, panes.inner(view.focus));
+    }
     if panes.status.height > 0 {
         draw_status(frame, view, panes.status);
     }
+}
+
+/// Draws a one-line note centred in `area`, on a reversed style so it reads as an overlay.
+///
+/// Non-modal by construction: it holds no state the key handler has to consult, and any key
+/// clears it, so it cannot trap the user (spec §4's "popup", which is all the modal surface
+/// this app needs).
+fn draw_toast(frame: &mut Frame, text: &str, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    // Clipped to the pane, so a long message cannot paint over a border.
+    let text = fit(text, area.width);
+    let width = Line::from(text.as_str()).width() as u16;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + area.height / 2;
+    let style = Style::new().add_modifier(Modifier::REVERSED);
+    frame
+        .buffer_mut()
+        .set_stringn(x, y, &text, usize::from(area.width), style);
 }
 
 fn draw_pane(frame: &mut Frame, view: &mut View, panes: &layout::Panes, focus: Focus, area: Rect) {
@@ -337,6 +489,16 @@ fn draw_status(frame: &mut Frame, view: &View, area: Rect) {
     // No `Wrap`: the line is already guaranteed to fit, and leaving wrapping off makes
     // "never wraps" a property of the code rather than of the widget's defaults.
     frame.render_widget(Paragraph::new(Line::from(fit(&line, area.width))), area);
+}
+
+/// The status-line sentence for a clipboard failure.
+///
+/// A fixed sentence, not the platform's error string: this shares one row with the harness
+/// name and the state word, and a raw `arboard` message would be clipped mid-word. The detail
+/// is kept on the error for a debug line.
+fn failure(err: &crate::clipboard::Error) -> String {
+    let _ = err.detail();
+    "clipboard unavailable".to_owned()
 }
 
 /// Truncates `text` to `width` display cells, ending in `…` when it had to cut.
@@ -1401,6 +1563,267 @@ mod tests {
                 crate::editor::Cursor::new(0, 10),
                 "resize moved the cursor at {width}"
             );
+        }
+    }
+
+    /// A view with a recording clipboard, so a copy or paste is observable without a display
+    /// server. Primed by a draw so the wrap state knows its width.
+    fn clipboard_view(focus: Focus, clipboard: crate::clipboard::Recording) -> View<'static> {
+        clipboard_view_with(focus, clipboard).0
+    }
+
+    /// The view plus a handle on the recording clipboard.
+    ///
+    /// A handle rather than a downcast: the view holds a `Box<dyn Clipboard>`, and a shared
+    /// `Rc` is the only way back to what was written.
+    fn clipboard_view_with(
+        focus: Focus,
+        clipboard: crate::clipboard::Recording,
+    ) -> (View<'static>, crate::clipboard::Recording) {
+        let config = Box::leak(Box::new(Config {
+            harness: Harness::Claude,
+            model: None,
+            session_id: None,
+            initial_source: String::new(),
+            initial_instructions: String::new(),
+        }));
+        let mut view = View::new(config, focus);
+        let handle = clipboard.clone();
+        view.clipboard = Box::new(clipboard);
+        let _ = draw_at(&mut view, 80, 24);
+        (view, handle)
+    }
+
+    fn ctrl_char(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_v_pastes_into_the_focused_editable_pane_at_the_cursor() {
+        let mut view = clipboard_view(Focus::Source, crate::clipboard::Recording::with("pasted"));
+        view.source = Editor::from_text("ab");
+        view.source.set_cursor(0, 1);
+        let _ = draw_at(&mut view, 80, 24);
+
+        view.handle_key(&ctrl_char('v'));
+
+        assert_eq!(
+            view.source.text(),
+            "apastedb",
+            "paste did not land at the cursor"
+        );
+        assert_eq!(
+            view.instructions.text(),
+            "",
+            "the wrong pane was pasted into"
+        );
+    }
+
+    #[test]
+    fn ctrl_v_pastes_multiline_text_as_real_lines() {
+        let mut view = clipboard_view(Focus::Source, crate::clipboard::Recording::with("one\ntwo"));
+
+        view.handle_key(&ctrl_char('v'));
+
+        assert_eq!(view.source.text(), "one\ntwo");
+        assert_eq!(
+            view.source.lines().len(),
+            2,
+            "newlines were not turned into line breaks"
+        );
+    }
+
+    #[test]
+    fn ctrl_v_in_a_read_only_pane_is_refused_with_a_toast() {
+        for focus in [Focus::Output, Focus::Debug] {
+            let mut view = clipboard_view(focus, crate::clipboard::Recording::with("pasted"));
+            let before_output = view.stream.output_text();
+            let before_debug = view.stream.debug_text();
+
+            view.handle_key(&ctrl_char('v'));
+
+            let toast = view.toast.as_deref().expect("no refusal shown");
+            assert!(
+                toast.contains("read-only"),
+                "the toast should say why: {toast}"
+            );
+            // Nothing was inserted and focus did not move.
+            assert_eq!(view.focus, focus, "the refusal moved focus");
+            assert_eq!(view.stream.output_text(), before_output);
+            assert_eq!(view.stream.debug_text(), before_debug);
+        }
+    }
+
+    #[test]
+    fn any_key_dismisses_the_toast_without_also_acting() {
+        let mut view = clipboard_view(Focus::Output, crate::clipboard::Recording::with("x"));
+        view.handle_key(&ctrl_char('v'));
+        assert!(view.toast.is_some());
+
+        // `y` would normally copy; while a toast is up it only dismisses, so a user clearing
+        // the note does not accidentally overwrite their clipboard.
+        view.handle_key(&ctrl_char('y'));
+        assert!(view.toast.is_none(), "the toast survived a key press");
+        assert!(
+            view.message.is_none(),
+            "the dismissing key also performed its action"
+        );
+    }
+
+    #[test]
+    fn ctrl_y_copies_the_focused_pane() {
+        // The debug pane is the interesting case: copying from a read-only pane is what makes
+        // its content usable outside the app.
+        let (mut view, clipboard) =
+            clipboard_view_with(Focus::Debug, crate::clipboard::Recording::default());
+        view.stream.app("a debug line".to_owned());
+
+        view.handle_key(&ctrl_char('y'));
+
+        let copied = clipboard
+            .written()
+            .expect("nothing was written to the clipboard");
+        assert!(
+            copied.contains("a debug line"),
+            "the debug pane's content was not copied: {copied:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_y_copies_the_source_pane_too() {
+        let (mut view, clipboard) =
+            clipboard_view_with(Focus::Source, crate::clipboard::Recording::default());
+        view.handle_key(&press_char('h'));
+        view.handle_key(&press_char('i'));
+
+        view.handle_key(&ctrl_char('y'));
+
+        assert_eq!(clipboard.written().as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn ctrl_y_on_an_empty_pane_says_so_and_writes_nothing() {
+        let (mut view, clipboard) =
+            clipboard_view_with(Focus::Source, crate::clipboard::Recording::default());
+
+        view.handle_key(&ctrl_char('y'));
+
+        assert_eq!(
+            clipboard.written(),
+            None,
+            "an empty pane wrote to the clipboard"
+        );
+        assert!(
+            view.message.as_deref().is_some_and(|m| m.contains("empty")),
+            "no note about the empty pane: {:?}",
+            view.message
+        );
+    }
+
+    #[test]
+    fn ctrl_e_replaces_the_source_from_any_focus_and_moves_focus_there() {
+        for focus in Focus::ALL {
+            let mut view = clipboard_view(focus, crate::clipboard::Recording::with("replacement"));
+            view.source = Editor::from_text("old");
+
+            view.handle_key(&ctrl_char('e'));
+
+            assert_eq!(
+                view.source.text(),
+                "replacement",
+                "Ctrl+E from {focus:?} did not target the source pane"
+            );
+            assert_eq!(
+                view.focus,
+                Focus::Source,
+                "focus did not move to the replaced pane from {focus:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_e_with_an_empty_clipboard_never_wipes_the_source() {
+        let mut view = clipboard_view(Focus::Source, crate::clipboard::Recording::default());
+        view.source = Editor::from_text("keep me");
+
+        view.handle_key(&ctrl_char('e'));
+
+        assert_eq!(
+            view.source.text(),
+            "keep me",
+            "an empty clipboard wiped the pane"
+        );
+        assert!(
+            view.message.as_deref().is_some_and(|m| m.contains("empty")),
+            "no note about the empty clipboard: {:?}",
+            view.message
+        );
+    }
+
+    #[test]
+    fn ctrl_v_with_an_empty_clipboard_never_wipes_a_pane() {
+        let mut view = clipboard_view(Focus::Source, crate::clipboard::Recording::default());
+        view.source = Editor::from_text("keep me");
+
+        view.handle_key(&ctrl_char('v'));
+
+        assert_eq!(view.source.text(), "keep me");
+        assert!(view.message.as_deref().is_some_and(|m| m.contains("empty")));
+    }
+
+    #[test]
+    fn a_clipboard_failure_is_a_status_note_and_the_app_keeps_working() {
+        // Spec §8: unavailable clipboard is a warning, with every other feature still working.
+        let mut view = clipboard_view(Focus::Source, crate::clipboard::Recording::default());
+        view.clipboard = Box::new(BrokenClipboard);
+        view.source = Editor::from_text("keep me");
+
+        view.handle_key(&ctrl_char('v'));
+        assert_eq!(view.source.text(), "keep me");
+        assert_eq!(
+            view.message.as_deref(),
+            Some("clipboard unavailable"),
+            "a clipboard failure should be one readable sentence"
+        );
+
+        view.handle_key(&ctrl_char('y'));
+        assert_eq!(view.message.as_deref(), Some("clipboard unavailable"));
+
+        // And the pane still edits, which is what "everything else works" means.
+        view.handle_key(&press_char('!'));
+        assert_eq!(view.source.text(), "keep me!");
+    }
+
+    #[test]
+    fn the_toast_is_drawn_over_the_focused_pane_and_the_status_line_survives() {
+        let mut view = clipboard_view(Focus::Debug, crate::clipboard::Recording::with("x"));
+        view.handle_key(&ctrl_char('v'));
+
+        let buffer = draw_at(&mut view, 80, 24);
+        let panes = layout::panes(Rect::new(0, 0, 80, 24));
+        let inner = panes.inner(Focus::Debug);
+        let rendered = (inner.y..inner.y + inner.height)
+            .map(|y| row(&buffer, y))
+            .collect::<String>();
+        assert!(
+            rendered.contains("read-only"),
+            "the toast was not drawn in the focused pane: {rendered:?}"
+        );
+        // A toast is an overlay, not a new layout: the status line keeps its row.
+        assert!(row(&buffer, panes.status.y).contains("claude"));
+    }
+
+    /// A clipboard that always fails, standing in for a machine with no display server.
+    #[derive(Debug)]
+    struct BrokenClipboard;
+
+    impl crate::clipboard::Clipboard for BrokenClipboard {
+        fn get_text(&mut self) -> Result<Option<String>, crate::clipboard::Error> {
+            Err(crate::clipboard::Error::unavailable("no display server"))
+        }
+
+        fn set_text(&mut self, _text: &str) -> Result<(), crate::clipboard::Error> {
+            Err(crate::clipboard::Error::unavailable("no display server"))
         }
     }
 

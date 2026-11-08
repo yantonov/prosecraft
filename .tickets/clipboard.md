@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 2
 deps: [editor-wrap, tui-dummy]
 attachments: []
 created: 2026-11-07T15:33:44Z
-updated: 2026-11-07T15:41:34Z
+updated: 2026-11-08T08:06:32Z
 ---
 # Clipboard: load, copy, paste
 

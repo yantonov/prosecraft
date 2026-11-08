@@ -16,11 +16,12 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use cli::{Config, PlaceholderClipboard};
+use cli::Config;
 use layout::Focus;
 use ui::Outcome;
 
 mod cli;
+mod clipboard;
 mod editor;
 mod harness;
 mod layout;
@@ -35,8 +36,13 @@ fn main() -> ExitCode {
     // happen here, before the harness check, which is what makes them work uninstalled.
     let args = cli::parse();
 
-    let mut clipboard = PlaceholderClipboard;
-    let config = match cli::assemble(args, cli::binary_on_path, &mut clipboard) {
+    // `System` connects lazily and `assemble` skips the read entirely under `--no-clipboard`,
+    // so this opens no display connection unless the source text actually comes from it.
+    let config = match cli::assemble(
+        args,
+        cli::binary_on_path,
+        &mut crate::clipboard::System::new(),
+    ) {
         Ok(config) => config,
         Err(err) => {
             // One line on stderr. No terminal state was touched yet, so the user's shell
@@ -99,6 +105,8 @@ impl Tui {
         } = self;
 
         let mut view = ui::View::new(config, *focus);
+        // The real clipboard for the running app; tests build views with the recording one.
+        view.clipboard = Box::new(crate::clipboard::System::new());
 
         event_loop(
             &mut view,
