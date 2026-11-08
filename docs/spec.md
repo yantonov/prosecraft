@@ -1,4 +1,4 @@
-# prosecraft — spec (draft v0.8)
+# prosecraft — spec (draft v0.9)
 
 A TUI that rewrites text with an LLM harness. Paste text on the left, set instructions for
 how to rewrite, press one key, read the result on the right. Change the text or the
@@ -8,8 +8,8 @@ Status: draft. Sections marked **[Q]** are unresolved, see [Open questions](#ope
 
 ## 1. Goal
 
-Rewrite a block of text with a mandatory, externally installed harness (`claude` or `pi`)
-run in one-shot (non-interactive) mode. Iterate by editing the instructions, or the source
+Rewrite a block of text with a mandatory, externally installed harness (`claude`, `pi`, or
+`codex`) run in one-shot (non-interactive) mode. Iterate by editing the instructions, or the source
 text, and pressing the same key again — the harness session carries the conversation
 history forward.
 
@@ -19,7 +19,9 @@ history forward.
 - Multi-turn chat with the model, or any conversation view.
 - **Any filesystem or side effect on the system.** The app shows text and talks to the
   harness. It reads the clipboard, writes the clipboard, and nothing else. Harness tool
-  use is disabled, not merely discouraged.
+  use is disabled, not merely discouraged. (codex cannot be denied its tools and is
+  sandboxed instead — measured, §6.5; a human accepted the weaker guarantee. The intent
+  above is unchanged: no run may reach the filesystem.)
 - Persisting anything across runs: no state file, no config file, no session pointer
   beyond what the harness itself stores.
 
@@ -39,7 +41,7 @@ history forward.
 ```
 prosecraft [OPTIONS]
 
-  --harness <claude|pi>        required; select the harness adapter
+  --harness <claude|pi|codex>  required; select the harness adapter
   --prompt <TEXT>              instructions for the rewrite
   --prompt-file <PATH>         read instructions from a file at startup
   --text <TEXT>                initial source text
@@ -188,7 +190,7 @@ says so. Resetting the session mid-run would discard the id the live process is 
 
 ## 6. Harness adapters
 
-One trait, two implementations. Adapter-specific argv lives only inside the adapter.
+One trait, three implementations. Adapter-specific argv lives only inside the adapter.
 
 ```rust
 struct Task<'a> {
@@ -206,13 +208,18 @@ struct Invocation {
 
 trait Harness {
     fn name(&self) -> &str;
-    fn new_session_id(&self) -> String;
+    /// `Some` when the client names sessions; `None` when the harness names its own and
+    /// reports the id on its event stream (codex, §6.5).
+    fn new_session_id(&self) -> Option<String>;
     /// `session == None` means this is the first call of the session.
     fn build(&self, task: &Task, session: Option<&str>) -> Result<Invocation>;
     /// Classify one stdout line for the debug pane. Never produces output text.
     fn classify(&self, line: &str) -> Event;
     /// Authoritative final text, if this line was the terminal event.
     fn final_text(&self, line: &str) -> Option<String>;
+    /// The session id, if this line was the one that announced it. Default `None`: a
+    /// client-named harness has nothing to announce (§6.5).
+    fn session_from_event(&self, line: &str) -> Option<String>;
 }
 ```
 
@@ -221,8 +228,21 @@ event vocabulary instead of the app parsing JSON generically. `Event` is a small
 (`Text`, `Think`, `Junk`), used only to label debug lines. A malformed or unrecognised line
 maps to `Junk` — never an error — so an unknown event type cannot abort a run.
 
-Both harnesses take the prompt as an argument rather than stdin: prompts may contain
+The two session methods on the trait are two halves of one question: **who names the
+session.** claude and pi accept an id the client chose (`new_session_id` returns `Some`, and
+the id is read back out of the argv the adapter wrote it into); codex generates the id
+itself and reports it on the event stream, so `new_session_id` returns `None` and
+`session_from_event` learns it from `thread.started` (§6.5). One method cannot express both
+directions, and both defaults are safe, so there are two.
+
+claude and pi take the prompt as an argument rather than stdin: prompts may contain
 `-` and quoting is one implementation instead of two.
+
+codex is the exception, and it is a property of the harness rather than of the platform, so
+it is stated per adapter: it takes the prompt on **stdin** everywhere (§6.5). The
+`Transport` in `Task` answers "does *this resolution on this OS* force stdin" — the Windows
+shim question below — and a codex adapter does not consult it at all, because its transport
+is fixed by which harness it is.
 
 **Windows exception, measured.** The `pi` installation on Windows is an npm shim: a
 `pi.cmd` batch file, with no `pi.exe`. A batch file's command line is re-parsed by
@@ -265,14 +285,16 @@ Relying on the flag would make "edit the instructions and press `Ctrl+R`" work o
 silently do nothing on claude — the worst failure mode, since the output looks plausible.
 
 **Decision: instructions always travel in the user turn.** The same template is used for
-both harnesses, both first call and continuation. `--system-prompt` is still passed on
-first call (it sets the register for the whole session and is cheap), but the app never
-depends on it for correctness. Consequence for the adapter: `build()` produces nearly
-identical argv for first call and continuation — only the session flag differs.
+every harness, both first call and continuation. `--system-prompt` is still passed on
+first call for claude and pi (it sets the register for the whole session and is cheap), but
+the app never depends on it for correctness. Consequence for the adapter: `build()` produces
+nearly identical argv for first call and continuation — only the session flag differs.
+codex has no system-prompt flag at all, which costs nothing for the same reason: measured,
+an instruction in the user turn takes effect on a continuation (§6.5).
 
 ### 6.1 Fixed user prompt
 
-Identical for both harnesses and for both first call and continuation:
+Identical for every harness and for both first call and continuation:
 
 ```
 INSTRUCTIONS:
@@ -293,8 +315,8 @@ instructions pane, the wire format is the app's business.
 the user may ask for commentary — measured: instructions saying "add a short explanation of
 your changes" produce explanation plus `**Improved text:**` in the same reply, and no
 reliable boundary exists in that prose. Asking for markers converts an extraction *guess*
-into a *protocol*: measured on both harnesses, the model wraps the result exactly as asked,
-including with preamble present.
+into a *protocol*: measured on claude, pi and codex, the model wraps the result exactly as
+asked, including with preamble present.
 
 Measured with markers:
 
@@ -309,24 +331,31 @@ strings, wherever they are.
 
 ### 6.1a Extracting the rewritten text
 
-Both harnesses are run in **streaming JSON mode** (§6.1b). Every stdout line is fed to the
-adapter, which routes it to the debug pane; only the text **between the markers** reaches
-the output pane.
+claude and pi are run in **streaming JSON mode** (§6.1b), and codex in its JSON mode, which
+is not a stream (§6.5). Every stdout line is fed to the adapter, which routes it to the
+debug pane; only the text **between the markers** reaches the output pane.
 
-Per harness, measured on claude 2.1.319 and pi 1.5.0:
+Per harness, measured on claude 2.1.319, pi 1.5.0 and codex-cli 0.159.0:
 
-| | claude | pi |
-|---|---|---|
-| flag | `--output-format stream-json --verbose --include-partial-messages` | `--mode json` |
-| final text event | `type == "result"` → `result` | last `message_end`, `role == "assistant"` |
-| streamed text delta | `stream_event` → `event.type == content_block_delta` → `delta.type == text_delta` → `delta.text` | `message_update` → `assistantMessageEvent.type == text_delta` → `delta` |
-| reasoning delta | `delta.type == thinking_delta` | `assistantMessageEvent.type == thinking_delta` |
+| | claude | pi | codex |
+|---|---|---|---|
+| flag | `--output-format stream-json --verbose --include-partial-messages` | `--mode json` | `exec --json` (same flag on `exec resume`) |
+| final text event | `type == "result"` → `result` | last `message_end`, `role == "assistant"` | last `item.completed` with `item.type == "agent_message"` → `item.text` |
+| streamed text delta | `stream_event` → `event.type == content_block_delta` → `delta.type == text_delta` → `delta.text` | `message_update` → `assistantMessageEvent.type == text_delta` → `delta` | **none** — measured, no delta events are emitted |
+| reasoning delta | `delta.type == thinking_delta` | `assistantMessageEvent.type == thinking_delta` | **none emitted**, though `reasoning_output_tokens` is non-zero |
+| session id | client-chosen, in the argv | client-chosen, in the argv | from `thread.started` → `thread_id` |
+
+**The terminal text is the last `agent_message`, never a tool item.** codex reports shell
+commands, file changes, web searches and MCP calls as their own
+`item.completed` events carrying output; taking "the last item with text" would put a
+command's stdout in the output pane. Only `item.type == "agent_message"` is prose.
 
 **Nothing is ever reconstructed by concatenation.** Measured on claude: the terminal
 `result` event carries the complete answer, and the concatenated `text_delta`s are exactly
 equal to it (76 bytes vs 76 bytes). Deltas are display-only; their only consumer is the
 debug pane. This removes the whole class of bugs where a dropped delta silently truncates
-the output.
+the output. For codex the rule is vacuous and still binding: there are no deltas to fall
+back to, so "exit 0 but no `agent_message`" is an error with nothing to guess from.
 
 **`--include-partial-messages` is required for claude.** Measured without it: the run emits
 `system`, `assistant`, `rate_limit_event`, `result` and **zero** `stream_event`s — no
@@ -359,9 +388,10 @@ something is genuinely wrong (truncation, refusal, a confused model), and silent
 presenting whatever text arrived as the rewrite is the failure mode this design exists to
 prevent. The debug pane always holds the full raw output, so diagnosis costs one keypress.
 
-Both harnesses buffer stdout when emitting plain text — measured: claude wrote nothing for
+claude and pi buffer stdout when emitting plain text — measured: claude wrote nothing for
 13 s, then the whole answer at once — which is why JSON streaming is required rather than
-optional (§6.1b).
+optional (§6.1b). codex's JSON mode buffers per item instead (§6.5), which is the same
+problem one level up and the reason §6.1b names the status line as its progress signal.
 
 - pi's stderr carries one line, `Warning: No project session found … creating a new
   session`. It goes to the debug pane.
@@ -399,6 +429,18 @@ Consequences:
 `Error: When using --print, --output-format=stream-json requires --verbose`; and without
 `--include-partial-messages` the run emits zero `stream_event`s, so there is no progress to
 show. Both flags are mandatory. pi needs neither — `--mode json` streams as-is.
+
+**codex cannot stream, and that is a limitation of the harness, not a missing flag.**
+Measured on a 300-word answer: `exec --json` emits `thread.started`, `turn.started`, then
+**one** `item.completed` carrying the whole `agent_message` at t≈21 s, then
+`turn.completed`. There is no per-token event in that mode — the binary does contain an
+`AgentMessageDeltaNotification`, but it belongs to the app-server protocol, not to
+`exec --json`. So for codex the debug pane is inert between items by necessity: the first
+lines land at t≈0.7 s and nothing follows until the answer arrives whole. The progress
+signal during a codex run is therefore the **status line's `running` state**, which is why
+it is drawn from the state machine rather than inferred from arriving text. Do not "fix"
+this by reaching for an unpublished transport: the app already shows what the harness gives
+it, and the output pane is written once per run either way.
 
 ### 6.2 claude
 
@@ -475,26 +517,132 @@ pi --print --session-id <id> --mode json
 
 ### 6.4 Why a trait, and what it costs
 
-The two harnesses differ in four places: the session flag for a new session vs a
-continuation, the id format (UUID v4 vs `[A-Za-z0-9._-]`), the tool-denial flags, and the
-event vocabulary (`stream_event`/`result` vs `message_update`/`agent_end`). Everything else
-— prompt template, output rules, process management — is shared. The event vocabulary is
-the largest of the four and the reason `classify`/`final_text` exist on the trait.
-`Harness::build` is a pure function, so both adapters get table tests over their argv
+The three harnesses differ in five places: the session flag for a new session vs a
+continuation, the id format (UUID v4 vs `[A-Za-z0-9._-]` vs a harness-chosen `01a1…`), the
+tool-denial flags, the event vocabulary (`stream_event`/`result` vs
+`message_update`/`agent_end` vs `item.completed`/`thread.started`), and **who names the
+session** (client vs harness, §6). Everything else — prompt template, output rules, process
+management — is shared. The event vocabulary is the largest of the five and the reason
+`classify`/`final_text` exist on the trait; who names the session is the reason
+`new_session_id` returns an `Option` and `session_from_event` exists at all.
+`Harness::build` is a pure function, so every adapter gets table tests over its argv
 without spawning anything. The `Task` carries `session: Option<&str>`, where `None` means
 "first call of this run"; the adapter, not the app, decides which flag that implies.
+
+### 6.5 codex
+
+Measured on codex-cli 0.159.0. This section is longer than §6.2 and §6.3 because two of its
+findings contradict what the rest of §6 assumes about *any* harness: codex has no
+tool-denial flag (only a sandbox), and codex cannot stream.
+
+First call:
+
+```
+codex exec --json
+      -c sandbox_mode="read-only" -c approval_policy="never"
+      -c project_doc_max_bytes=0 -c features.apps=false
+      -c web_search="disabled"
+      --skip-git-repo-check
+      [--model <name>]
+      -- -
+```
+
+Continuation:
+
+```
+codex exec resume --json
+      <same -c block and --skip-git-repo-check>
+      [--model <name>]
+      <thread-id>
+      -- -
+```
+
+The prompt travels on **stdin** in both shapes (`-- -` makes the positional a literal dash
+and codex reads the prompt from the pipe), so `Invocation.stdin` is always `Some` and `args`
+never carries the prompt. Measured: both transports round-trip the real template with every
+newline and both markers intact, so this is a choice, not a workaround — it keeps user prose
+out of the OS argument list, and sidesteps the batch-shim limit §6 documents.
+
+Each flag below was measured; the reason is what keeps it from being "tidied" away.
+
+- **`-c sandbox_mode="read-only"` *and* `-c approval_policy="never"`, together.** This is
+  the substitution for `--tools ""` and `--no-tools`, and the pair is load-bearing.
+  Measured: `-s read-only` alone leaves approvals on-request and a write succeeded in 3 of 3
+  runs; `-c sandbox_mode` alone likewise. The two together blocked every attempt (9 of 9,
+  across a git repo and a plain directory, including a shell fetch and a write attempted
+  through the residual JS REPL, which failed with `EPERM`). `-c` is used rather than `-s`
+  because `exec resume` rejects `-s` (`unexpected argument`), and one flag shape for both
+  call shapes is one place to get it wrong instead of two.
+- **`-c project_doc_max_bytes=0`.** codex's `--no-context-files`. Measured: without it the
+  user's own `AGENTS.md` is in the prompt and the model reproduces it verbatim when asked;
+  with it, absent. A rewrite must not silently inherit the user's coding guidelines.
+- **`-c features.apps=false`.** Measured: 147 tools offered become 29, and the whole Codex
+  app MCP surface leaves the prompt.
+- **`-c web_search="disabled"` — and it only works in combination with the flag above.**
+  Measured, and the pairing is the whole point: with `features.apps=false` alone the model
+  can still search (`apps=false only` returned a live headline through the `web__run`
+  tool); with `web_search="disabled"` alone it can still search too. Only the two together
+  produced `NO-WEB-ACCESS`. So neither flag is redundant, and neither is sufficient.
+- **Not used: `-c tools.web_search=false`.** Measured: it does not remove the tool
+  (`web__run` stayed), so it would read as a denial that denies nothing.
+- **`--skip-git-repo-check`.** Measured: without it codex refuses to run outside a git repo
+  with `Not inside a trusted directory`, which would make the app fail in every directory
+  that is not a checkout.
+- **`--json`.** The machine-readable mode; `exec resume` needs it repeated.
+
+**Deliberately absent: `--ignore-user-config` and `-s`.** `--ignore-user-config` disables
+the user's own `config.toml`, which is where their model choice lives, and measured it also
+changed whether writes were blocked; using it would swap "the user's config is respected"
+for a second, weaker layer of denial. A future change that reaches for either flag is a
+regression, so §6.5 names them.
+
+**Session lifecycle is inverted, and this is why the trait changed.** codex names its own
+threads: `-c thread_id=…` is ignored, and the id appears only on stdout as
+`{"type":"thread.started","thread_id":"01a1bc…"}`. So `new_session_id` returns `None` and the
+app learns the id through `session_from_event` (`§6`), taking the first id it is offered and
+keeping it for the run. `Ctrl+N` still works, because an unnamed first call is a new thread
+and its id is learned from its own stream.
+
+**Tool denial is sandbox-level here, which is weaker than §1 asks.** codex cannot be denied
+its tools: the config keys that look like denials are rejected by `--strict-config`
+(`unknown configuration field`) or do nothing, and a JS REPL (`mcp__node_repl__js`,
+`mcp__cua_repl.js`) survives every filter. What holds is the sandbox: read-only filesystem,
+approvals never answered, network refused (measured: a shell fetch fails). No run reached
+the filesystem, which is §1's actual requirement, but it is enforced one layer lower than
+for claude and pi, so "tools are disabled" would be a false statement about codex. A human
+accepted this trade rather than dropping codex support; the alternative — refusing the
+adapter — was rejected because the observable guarantee (nothing is written) holds.
+
+**Residual cost, accepted.** codex injects its own developer prompt and a skills catalogue
+(~30 KB of local `SKILL.md` descriptions, ~18 k input tokens) into every call, and no config
+key found suppresses it (`skills_instructions`, `include_skills_usage_instructions`,
+`features.skill_search=false` are all rejected). It costs tokens and register, not
+correctness: measured, the markers still come back.
+
+**No stream.** See §6.1b: codex emits one complete `agent_message`, so the debug pane fills
+in jumps. Recorded there rather than here because it is a property of the JSON mode, not of
+the argv.
+
+Measured end to end on the exact argv above: first call `<<<TEXT>>>Arrr, send me the
+report, matey.<<<END>>>`, continuation with changed instructions `<<<TEXT>>>You are hereby
+requested to furnish the report to the undersigned.<<<END>>>` on the same thread id, the
+user's `AGENTS.md` never present, and no file created.
 
 ## 7. Process handling
 
 - `std::process::Command` with `stdout`/`stderr` piped; one reader thread per stream
   (`BufRead::lines`) sending `(Stream, String)` over an `mpsc` channel.
 - The UI thread never blocks: it drains the channel each tick (~16 ms) and redraws once per
-  tick. Measured event volume is ~280 lines for claude and ~550 for pi on one rewrite, so
-  per-event redraws would be wasteful; per-tick batching is required, not an optimisation.
+  tick. Measured event volume is ~280 lines for claude, ~550 for pi and **~7 for codex**
+  per rewrite, so per-event redraws would be wasteful; per-tick batching is required, not
+  an optimisation.
 - Each stdout line goes to the active harness's `classify` and is appended to the debug pane
   with its kind. `final_text` is consulted on every line; at most one line per run returns
   `Some`, and that text is what the output pane receives. Lines that do not parse as JSON
   are shown as `junk` — a harness printing garbage is a diagnosable event, not a failure.
+- For a harness that names its own session, `session_from_event` is also consulted on every
+  line until an id is known, and only until then: codex announces its thread once, and a
+  later id can only belong to a run the app did not start.
 - Cancellation: kill the child, state `cancelled`, output pane stays as cleared on spawn.
   A cancelled run produces no final text by definition, so there is nothing to show and
   nothing to reconcile.
@@ -520,6 +668,7 @@ Measured failure modes worth encoding:
 | Empty instructions | Validation error, focus to instructions pane |
 | Empty source text | Validation error, focus to source pane |
 | Session id missing/invalid with `--resume` | Never reachable: id is internal state, generated before use. Treat as a bug — debug assert |
+| Session id never announced by the harness | State `error` when the run ends with no id and no terminal text; a continuation cannot be attempted without one, and the status line keeps `—` |
 | Non-zero exit | State `error`, debug tail visible (claude puts the reason on stderr); output pane keeps the cleared state for this run |
 | Timeout | Kill, state `error`, debug pane notes the timeout |
 | Clipboard unavailable | Status-line warning, everything else still works |
@@ -527,7 +676,7 @@ Measured failure modes worth encoding:
 | Markers honoured | Text between `<<<TEXT>>>` and `<<<END>>>` becomes the output; everything outside is discarded (§6.1a) |
 | Missing output markers | State `error`, raw terminal text shown, debug pane holds the full output (§6.1a) |
 | Tool-call XML between markers | State `error`, text shown, debug explains that tools are denied (§6.1a) |
-| Exit 0 but no terminal event | State `error`: no `result`/`agent_end` means no final text. Never fall back to concatenating deltas (§6.1a) |
+| Exit 0 but no terminal event | State `error`: no `result`/`agent_end`/`agent_message` means no final text. Never fall back to concatenating deltas (§6.1a) |
 
 Exit codes: `0` normal, `1` runtime failure (including harness missing), `2` CLI misuse.
 
@@ -542,6 +691,7 @@ src/ui.rs           layout, pane rendering, keybindings -> actions
 src/harness/mod.rs  Harness trait, Task, Invocation
 src/harness/claude.rs
 src/harness/pi.rs
+src/harness/codex.rs
 src/process.rs      spawn, stream readers, cancel, timeout
 ```
 
@@ -575,6 +725,20 @@ machine is tested headlessly, with the terminal backend stubbed.
    `--no-context-files` keeps `AGENTS.md` out of the system message.
 5. **M5 — robustness.** Cancel, timeout, error paths, resize, missing-terminal-event
    handling, debug pane ring-buffer trimming.
+6. **M6 — codex adapter.** Third adapter, and the one that exercises the harness-named
+   session path. Verify: argv table tests for both call shapes; the thread id is learned
+   from `thread.started` and survives a continuation, so a changed instruction takes effect
+   on the same thread (the §6.0 regression, measured: pirate → legal register); `Ctrl+N`
+   produces a different thread id and drops the context; a prompt that tells the model to
+   write a file leaves no file behind, and one that asks it to quote `AGENTS.md` yields
+   nothing; the debug pane does **not** stream, per §6.1b, and that is not a defect.
+6. **M6 — codex adapter.** Third adapter, and the one that exercises the harness-named
+   session path. Verify: argv table tests for both call shapes; the thread id is learned
+   from `thread.started` and survives a continuation, so a changed instruction takes effect
+   on the same thread (the §6.0 regression, measured: pirate → legal register); `Ctrl+N`
+   produces a different thread id and drops the context; a prompt that tells the model to
+   write a file leaves no file behind, and one that asks it to quote `AGENTS.md` yields
+   nothing; the debug pane does **not** stream, per §6.1b, and that is not a defect.
 
 ## Decisions
 
@@ -585,9 +749,12 @@ focused pane and cancels only in the debug pane after a confirming second press,
 keeps its terminal meaning of copy; output pane = final text only, debug pane
 = streaming/reasoning/stderr/app events; output pane cleared on spawn;
 harness binary is checked at startup and missing means a stderr error and non-zero exit;
-tool denial is verified for both harnesses (no file was created in three claude attempts
-and one pi attempt); output **streams** (§6.1b), because plain-text mode buffers the whole
-answer (`claude` wrote nothing for 13 s then everything at once); harness and model are
+tool denial is verified for claude and pi (no file was created in three claude attempts
+and one pi attempt), and for codex it is a **sandbox** rather than a denial (§6.5) —
+that is the one place the three harnesses are not equal, it was accepted deliberately, and
+it is stated in §1 rather than left for a reader to infer; output **streams** (§6.1b),
+because plain-text mode buffers the whole answer (`claude` wrote nothing for 13 s then
+everything at once), except on codex, which cannot stream; harness and model are
 fixed at init from the command line, with no TUI selection; instructions are read once at
 startup and never reloaded (restart after editing the file); `Ctrl+N` while running is
 ignored like `Ctrl+R`; the name stays `prosecraft`; the rewritten text is delimited by
