@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 3
 deps: [editor-wiring]
 attachments: []
 created: 2026-11-07T17:03:36Z
-updated: 2026-11-08T08:52:46Z
+updated: 2026-11-08T09:01:17Z
+closed-at: 2026-11-08T09:01:17Z
 ---
 # Remove the dead_code allowance from src/editor.rs
 
