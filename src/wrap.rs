@@ -34,6 +34,8 @@
 // calls it yet. The attribute goes away with that ticket.
 #![allow(dead_code)]
 
+use std::cell::Cell;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -289,12 +291,18 @@ fn cursor_in_row(rows: &[VisualRow], editor: &Editor, index: usize, goal: usize)
 /// a height, and because the buffer must stay a pure text model. The sticky column lives here
 /// for the same reason: it is a property of a *run of vertical moves*, not of the text, and
 /// storing it in the editor would make it survive edits that should cancel it.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct WrapState {
     /// First visible row, counted from the top of the buffer.
     scroll: usize,
     /// The cell column a vertical run is aiming at, with the cursor it was captured at.
     goal: Option<Goal>,
+    /// The inner geometry of the last draw, in cells: `(width, height)`.
+    ///
+    /// A key arrives between draws, so a text operation has no other way to learn the width it
+    /// must wrap at or the height it must page by. A `Cell` because `render` only needs to
+    /// record it, and threading `&mut self` through the draw for a cache would be worse.
+    viewport: Cell<(u16, u16)>,
 }
 
 /// The column a run of `Up`/`Down` is holding, keyed by the cursor it started from.
@@ -317,6 +325,17 @@ impl WrapState {
     /// and only a draw knows the width and height to clamp against.
     pub fn scroll(&self) -> usize {
         self.scroll
+    }
+
+    /// The width of the last draw, for wrapping. Zero before the first draw, which is the
+    /// same degenerate case a zero-width pane has: one empty row per line.
+    pub fn viewport_width(&self) -> u16 {
+        self.viewport.get().0
+    }
+
+    /// The height of the last draw, for paging.
+    pub fn viewport_height(&self) -> u16 {
+        self.viewport.get().1
     }
 
     /// One visual row up, holding the target cell column.
@@ -428,10 +447,38 @@ impl WrapState {
     /// Reads `self` only: the caller scrolls first (see [`WrapState::scroll_to_cursor`]) so
     /// one draw cannot move the view. The cursor is drawn whenever it is in the window and
     /// left hidden otherwise, which is ratatui's default when it is not set.
-    pub fn render(&self, frame: &mut Frame, editor: &Editor, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, editor: &Editor, area: Rect) {
+        self.render_with_cursor(frame, editor, area, true);
+    }
+
+    /// Draws the pane without placing the cursor, for an editable pane that does not have
+    /// focus.
+    ///
+    /// A pane drawn a moment before the focused one would otherwise leave the terminal cursor
+    /// behind the wrong pane: the last `set_cursor_position` of a draw wins, and both editable
+    /// panes run through this function.
+    pub fn render_unfocused(&mut self, frame: &mut Frame, editor: &Editor, area: Rect) {
+        self.render_with_cursor(frame, editor, area, false);
+    }
+
+    fn render_with_cursor(
+        &mut self,
+        frame: &mut Frame,
+        editor: &Editor,
+        area: Rect,
+        focused: bool,
+    ) {
+        // Recorded before the degenerate-size early return: a zero-sized pane is still the
+        // pane's geometry, and the next key has to work in it rather than in a stale one.
+        self.viewport.set((area.width, area.height));
         if area.width == 0 || area.height == 0 {
             return;
         }
+        // Follow the cursor before drawing. Without this a buffer seeded with more rows than
+        // the pane is tall draws from the top with the cursor off-screen, and the pane looks
+        // as if it lost the user's position; a key that moves the cursor would then have to
+        // be pressed twice to see any effect.
+        self.scroll_to_cursor(editor, area.width, area.height);
         let rows = buffer_rows(editor, area.width);
         let height = usize::from(area.height);
         // Same clamp as `scroll_to_cursor`, for the case where the content changed after the
@@ -454,6 +501,9 @@ impl WrapState {
             }
         }
 
+        if !focused {
+            return;
+        }
         let cursor = project(&rows, editor);
         if cursor.row >= scroll && cursor.row < scroll + height {
             let x = area.x + cursor.column.min(usize::from(area.width) - 1) as u16;
@@ -535,7 +585,7 @@ mod tests {
         }
     }
 
-    fn draw_in(editor: &Editor, state: &WrapState, area: Rect) -> Drawn {
+    fn draw_in(editor: &Editor, state: &mut WrapState, area: Rect) -> Drawn {
         let mut terminal =
             Terminal::new(TestBackend::new(area.right().max(1), area.bottom().max(1))).unwrap();
         terminal
@@ -549,7 +599,7 @@ mod tests {
         }
     }
 
-    fn draw(editor: &Editor, state: &WrapState, width: u16, height: u16) -> Drawn {
+    fn draw(editor: &Editor, state: &mut WrapState, width: u16, height: u16) -> Drawn {
         draw_in(editor, state, Rect::new(0, 0, width, height))
     }
 
@@ -1213,7 +1263,7 @@ mod tests {
         let mut state = WrapState::new();
         state.scroll_to_cursor(&editor, 10, 4);
 
-        let drawn = draw(&editor, &state, 10, 4);
+        let drawn = draw(&editor, &mut state, 10, 4);
         assert_eq!(drawn.row(0), "aaaaaaaaa");
         assert_eq!(drawn.row(1), "bbbbbbbbb");
         assert_eq!(drawn.row(2), "");
@@ -1225,7 +1275,7 @@ mod tests {
         let mut state = WrapState::new();
         state.scroll_to_cursor(&editor, 10, 4);
 
-        let drawn = draw(&editor, &state, 10, 4);
+        let drawn = draw(&editor, &mut state, 10, 4);
         assert_eq!(drawn.row(0), "aaaaaaaaa");
         assert_eq!(drawn.row(1), "bbbbbbbbb");
         assert_eq!(drawn.row(2), "ccccccccc");
@@ -1237,7 +1287,7 @@ mod tests {
         let mut state = WrapState::new();
         state.scroll_to_cursor(&editor, 5, 4);
 
-        let drawn = draw(&editor, &state, 5, 4);
+        let drawn = draw(&editor, &mut state, 5, 4);
         assert_eq!(drawn.row(0), "abcde");
         assert_eq!(drawn.row(1), "fghij");
         assert_eq!(drawn.row(2), "klm");
@@ -1255,7 +1305,7 @@ mod tests {
         editor.set_cursor(9, 0);
         state.scroll_to_cursor(&editor, 80, 3);
 
-        let drawn = draw(&editor, &state, 80, 3);
+        let drawn = draw(&editor, &mut state, 80, 3);
         assert_eq!(drawn.row(0), "line7");
         assert_eq!(drawn.row(1), "line8");
         assert_eq!(drawn.row(2), "line9");
@@ -1268,15 +1318,21 @@ mod tests {
     }
 
     #[test]
-    fn render_hides_the_cursor_when_the_offset_leaves_it_off_screen() {
-        // `render` reads the offset; a caller that scrolls without the cursor (a read-only
-        // style view) must not get a cursor floating outside the window.
+    fn render_follows_the_cursor_rather_than_drawing_it_off_screen() {
+        // A buffer taller than the pane used to draw from the top, leaving the cursor outside
+        // the window; `render` now scrolls to it first, which is what makes a seeded buffer
+        // and a resize behave. The pane is three rows and the cursor is on row 10.
         let mut editor = numbered(10);
         editor.set_cursor(9, 0);
-        let state = WrapState::new();
+        let mut state = WrapState::new();
 
-        let drawn = draw(&editor, &state, 80, 3);
-        assert!(!drawn.visible, "a cursor was drawn outside the window");
+        let drawn = draw(&editor, &mut state, 80, 3);
+        assert!(
+            drawn.visible,
+            "the cursor was left outside the window instead of scrolling to it"
+        );
+        // And it is on the last visible row, since scrolling moves the minimum.
+        assert_eq!(drawn.cursor.y, 2, "cursor is not on the final row");
     }
 
     #[test]
@@ -1285,12 +1341,12 @@ mod tests {
         let mut state = WrapState::new();
         state.scroll_to_cursor(&editor, 5, 3);
 
-        let drawn = draw(&editor, &state, 5, 3);
+        let drawn = draw(&editor, &mut state, 5, 3);
         // Column 7 is row 1, cell 2: one row below the top, two cells in.
         assert_eq!(drawn.cursor, Position::new(2, 1));
 
         editor.set_cursor(0, 2);
-        let drawn = draw(&editor, &state, 5, 3);
+        let drawn = draw(&editor, &mut state, 5, 3);
         assert_eq!(drawn.cursor, Position::new(2, 0));
     }
 
@@ -1300,7 +1356,7 @@ mod tests {
         let mut state = WrapState::new();
         state.scroll_to_cursor(&editor, 5, 2);
 
-        let drawn = draw_in(&editor, &state, Rect::new(3, 1, 5, 2));
+        let drawn = draw_in(&editor, &mut state, Rect::new(3, 1, 5, 2));
         assert_eq!(drawn.buffer[(3, 1)].symbol(), "a");
         assert_eq!(drawn.buffer[(3, 2)].symbol(), "f");
         // Row 1 of the pane is terminal row 2, cell 2 is terminal column 5.
@@ -1313,14 +1369,14 @@ mod tests {
         // no terminal can draw. The drawn cursor stops one cell short and nothing else
         // changes, so the buffer and the logical cursor are unaffected.
         let editor = at("abcde", 0, 5);
-        let state = WrapState::new();
+        let mut state = WrapState::new();
 
         assert_eq!(
             visual(&editor, 5),
             (0, 5),
             "the arithmetic must keep cell 5"
         );
-        let drawn = draw(&editor, &state, 5, 2);
+        let drawn = draw(&editor, &mut state, 5, 2);
         assert_eq!(drawn.cursor, Position::new(4, 0));
         assert_eq!(editor.text(), "abcde");
         assert_eq!(editor.cursor(), Cursor::new(0, 5));
@@ -1335,12 +1391,12 @@ mod tests {
         let editor = editor("世界");
         let mut state = WrapState::new();
         state.scroll_to_cursor(&editor, 1, 2);
-        let drawn = draw(&editor, &state, 1, 2);
+        let drawn = draw(&editor, &mut state, 1, 2);
         assert_eq!(drawn.buffer[(0, 0)].symbol(), " ");
         assert_eq!(editor.text(), "世界");
 
         state.scroll_to_cursor(&editor, 2, 2);
-        let drawn = draw(&editor, &state, 2, 2);
+        let drawn = draw(&editor, &mut state, 2, 2);
         assert_eq!(drawn.row(0), "世");
         assert_eq!(drawn.row(1), "界");
     }
@@ -1351,7 +1407,7 @@ mod tests {
         let mut state = WrapState::new();
         state.scroll_to_cursor(&editor, 1, 3);
 
-        let drawn = draw(&editor, &state, 1, 3);
+        let drawn = draw(&editor, &mut state, 1, 3);
         assert_eq!(drawn.row(0), "a");
         assert_eq!(drawn.row(1), "b");
         assert_eq!(drawn.row(2), "c");
@@ -1361,18 +1417,18 @@ mod tests {
     #[test]
     fn render_at_a_zero_sized_area_draws_nothing() {
         let editor = editor("abc");
-        let state = WrapState::new();
+        let mut state = WrapState::new();
 
         // A zero-width pane is what a 1-cell-wide terminal gives a bordered frame; a
         // zero-height one is a pane squeezed by the layout. Neither may panic or draw.
-        let drawn = draw_in(&editor, &state, Rect::new(0, 0, 0, 3));
+        let drawn = draw_in(&editor, &mut state, Rect::new(0, 0, 0, 3));
         assert!(!drawn.visible);
         assert_eq!(
             drawn.buffer.area.width, 1,
             "the test backend has no 0-wide buffer"
         );
 
-        let drawn = draw_in(&editor, &state, Rect::new(0, 0, 3, 0));
+        let drawn = draw_in(&editor, &mut state, Rect::new(0, 0, 3, 0));
         assert!(!drawn.visible);
     }
 
@@ -1385,7 +1441,7 @@ mod tests {
 
         for width in [40, 20, 5, 1, 0, 1, 7, 80] {
             state.scroll_to_cursor(&editor, width, 4);
-            let drawn = draw(&editor, &state, width.max(1), 4);
+            let drawn = draw(&editor, &mut state, width.max(1), 4);
             assert!(drawn.visible || width == 0, "cursor lost at width {width}");
             assert_eq!(editor.text(), text, "width {width} edited the buffer");
             assert_eq!(editor.cursor(), cursor, "width {width} moved the cursor");

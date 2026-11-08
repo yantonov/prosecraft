@@ -9,15 +9,13 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Paragraph};
 
 use crate::cli::Config;
+use crate::editor::Editor;
 use crate::layout::{self, Focus};
 use crate::panes::StreamState;
-
-/// Glyph standing in for the cursor until the editor ticket brings a real one. A block on a
-/// single cell reads as a caret without needing a styled-background pass over the buffer.
-const CURSOR: &str = "▏";
+use crate::wrap::WrapState;
 
 /// Shown instead of quitting when the quit key arrives mid-rewrite (spec §4: "Quit; confirm
 /// if a rewrite is running"). Accepting the confirmation is the robustness ticket, so this
@@ -69,8 +67,13 @@ pub enum Outcome {
 pub struct View<'a> {
     pub config: &'a Config,
     pub focus: Focus,
-    pub source: &'a str,
-    pub instructions: &'a str,
+    /// The two editable buffers (spec §9). Owned, because editing writes to them; the wrap
+    /// state beside each one holds its scroll offset and sticky column, which depend on a
+    /// width the buffer deliberately does not know about.
+    pub source: Editor,
+    pub source_wrap: WrapState,
+    pub instructions: Editor,
+    pub instructions_wrap: WrapState,
     /// Content and scroll state of the output and debug panes (spec §5, §6.1b). Owned here
     /// rather than borrowed because the stream writes into it while the view is alive.
     pub stream: StreamState,
@@ -87,8 +90,10 @@ impl<'a> View<'a> {
         Self {
             config,
             focus,
-            source: &config.initial_source,
-            instructions: &config.initial_instructions,
+            source: Editor::from_text(&config.initial_source),
+            source_wrap: WrapState::new(),
+            instructions: Editor::from_text(&config.initial_instructions),
+            instructions_wrap: WrapState::new(),
             stream: StreamState::new(),
             state: State::Idle,
             message: None,
@@ -112,6 +117,41 @@ impl<'a> View<'a> {
         }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             return self.interrupt();
+        }
+        // Editing and moving in an editable pane come before focus routing, because the same
+        // key means different things either side of it: Tab changes focus, a character types.
+        // Ctrl chords are excluded here and left to the arms below, so Ctrl+Left still jumps
+        // columns instead of moving within the line.
+        if self.focus.is_editable() && !key.modifiers.contains(KeyModifiers::CONTROL) {
+            // The width the wrap layer needs is the one the last draw used, which is why every
+            // text operation takes `width` from the cached viewport rather than guessing.
+            if let Some((editor, wrap)) = self.editable(self.focus) {
+                let width = wrap.viewport_width();
+                match key.code {
+                    KeyCode::Char(c) => editor.insert_char(c),
+                    KeyCode::Enter => editor.insert_newline(),
+                    KeyCode::Backspace => editor.backspace(),
+                    KeyCode::Delete => editor.delete(),
+                    // Up/Down move by *visual* row (spec §4): a wrapped line is several rows,
+                    // and stepping by logical line would make Down skip content.
+                    KeyCode::Up => wrap.move_up(editor, width),
+                    KeyCode::Down => wrap.move_down(editor, width),
+                    KeyCode::Left => editor.move_left(),
+                    KeyCode::Right => editor.move_right(),
+                    // Horizontal paging is not a thing; the vertical ones are below.
+                    KeyCode::PageUp => wrap.page_up(editor, width, wrap.viewport_height()),
+                    KeyCode::PageDown => wrap.page_down(editor, width, wrap.viewport_height()),
+                    _ => {
+                        // Every other key is focus routing's business, so it falls through
+                        // rather than being swallowed by the editor.
+                        return self.route_focus(key);
+                    }
+                }
+                // The cursor may have left the window, so the view follows it before the next
+                // draw rather than a keystroke later.
+                wrap.scroll_to_cursor(editor, width, wrap.viewport_height());
+                return Outcome::Continue;
+            }
         }
         // Scrolling a read-only pane is a view operation, not a movement of the cursor, so it
         // is handled before focus routing and only for the panes that have an offset.
@@ -139,8 +179,16 @@ impl<'a> View<'a> {
                 _ => {}
             }
         }
-        // Esc stays in the fall-through arm on purpose: spec §4 fixes it as "does nothing in
-        // v0.1", and a key silently doing something later is harder to notice than a test.
+        self.route_focus(key)
+    }
+
+    /// The §4 focus keys: `Tab`/`Shift+Tab` in reading order, `Ctrl+Left`/`Ctrl+Right` across
+    /// columns. Every other key is ignored here, so a key owned by a later ticket does nothing
+    /// rather than something surprising.
+    ///
+    /// Esc is in the fall-through arm on purpose: spec §4 fixes it as "does nothing in v0.1",
+    /// and a key that silently starts doing something later is harder to notice than a test.
+    fn route_focus(&mut self, key: &KeyEvent) -> Outcome {
         self.focus = match (key.code, key.modifiers) {
             // Terminals disagree on how Shift+Tab arrives, so both spellings are accepted.
             (KeyCode::Tab, KeyModifiers::SHIFT) | (KeyCode::BackTab, _) => self.focus.prev(),
@@ -177,19 +225,22 @@ impl<'a> View<'a> {
         }
     }
 
-    /// The editable panes' text. The read-only ones are drawn by [`StreamState`], which owns
-    /// their wrapping and scroll offsets.
-    fn content(&self, focus: Focus) -> &'a str {
+    /// The editor and wrap state of one editable pane, mutably.
+    ///
+    /// A pair rather than a merged type: the buffer is logical and width-free, the wrap state
+    /// is visual and width-dependent, and every operation that moves the cursor needs both.
+    /// `None` for the read-only panes, which have neither.
+    fn editable(&mut self, focus: Focus) -> Option<(&mut Editor, &mut WrapState)> {
         match focus {
-            Focus::Source => self.source,
-            Focus::Instructions => self.instructions,
-            Focus::Output | Focus::Debug => "",
+            Focus::Source => Some((&mut self.source, &mut self.source_wrap)),
+            Focus::Instructions => Some((&mut self.instructions, &mut self.instructions_wrap)),
+            Focus::Output | Focus::Debug => None,
         }
     }
 }
 
 /// Draws the panes, then the status line over whatever the panes left.
-pub fn render(frame: &mut Frame, view: &View) {
+pub fn render(frame: &mut Frame, view: &mut View) {
     let panes = layout::panes(frame.area());
     for (focus, area) in panes.all() {
         // A zero-sized pane is normal at tiny terminal sizes and must draw nothing at all.
@@ -202,7 +253,7 @@ pub fn render(frame: &mut Frame, view: &View) {
     }
 }
 
-fn draw_pane(frame: &mut Frame, view: &View, panes: &layout::Panes, focus: Focus, area: Rect) {
+fn draw_pane(frame: &mut Frame, view: &mut View, panes: &layout::Panes, focus: Focus, area: Rect) {
     let focused = focus == view.focus;
     // The debug pane says so when it has stopped following the stream, so a scrolled pane
     // cannot look frozen (spec §6.1b). The output pane has nothing to follow and never says
@@ -226,21 +277,22 @@ fn draw_pane(frame: &mut Frame, view: &View, panes: &layout::Panes, focus: Focus
     // `panes.inner(focus)`: that rectangle is the width the wrap ticket wraps to, and taking
     // it from one place keeps the two from disagreeing.
     frame.render_widget(block, area);
-    if focus.is_editable() {
-        // `Wrap` is what makes text soft-wrap instead of truncate; the widths it uses are the
-        // pane's own, so each pane wraps at the width this layout gave it.
-        let text = view.content(focus);
-        let content = if focused {
-            with_cursor(text)
-        } else {
-            text.to_owned()
-        };
-        let paragraph = Paragraph::new(content).wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, panes.inner(focus));
-    } else {
+    match view.editable(focus) {
+        // The editor's own wrap layer draws the pane, so the buffer is never reflowed and the
+        // cursor is the terminal's rather than a glyph appended to the text. Only the focused
+        // pane shows a cursor, which is why the unfocused one is drawn without setting it.
+        Some((editor, wrap)) => {
+            // Only the focused pane owns the cursor: the last `set_cursor_position` of a draw
+            // wins, so an unfocused pane placing one would steal it.
+            if focused {
+                wrap.render(frame, editor, panes.inner(focus));
+            } else {
+                wrap.render_unfocused(frame, editor, panes.inner(focus));
+            }
+        }
         // Read-only panes own their wrapping and their offset: `StreamState` is what keeps a
         // page a screenful and the auto-tail honest.
-        view.stream.render(focus, frame, panes.inner(focus));
+        None => view.stream.render(focus, frame, panes.inner(focus)),
     }
 }
 
@@ -261,12 +313,6 @@ fn border_style(focused: bool) -> Style {
     } else {
         Style::new()
     }
-}
-
-/// Placeholder caret: appended to the text so the glyph lands after the last character
-/// without a second render pass or a character-cell measurement.
-fn with_cursor(text: &str) -> String {
-    format!("{text}{CURSOR}")
 }
 
 /// One line, always: spec §8 puts a long error here, and a status line that wrapped would
@@ -354,14 +400,65 @@ mod tests {
         }
     }
 
-    fn draw_at(view: &View, width: u16, height: u16) -> Buffer {
+    fn draw_at(view: &mut View, width: u16, height: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, view)).unwrap();
         terminal.backend().buffer().clone()
     }
 
+    /// Draws a view and returns where the terminal cursor was placed, which is how a cursor is
+    /// observable now that it is not a glyph in the buffer.
+    ///
+    /// Read inside the draw closure: `Frame`'s cursor field is private and `TestBackend`
+    /// reports `(0,0)` both for "no cursor" and for a cursor genuinely at the origin, so
+    /// asking the backend afterwards cannot tell the two apart.
+    fn cursor_of(view: &mut View, width: u16, height: u16) -> Option<(u16, u16)> {
+        let predicted = cursor_from_view(view, width, height);
+
+        // And the draw must agree with the prediction: TestBackend stores whatever
+        // `set_cursor_position` was given, defaulting to the origin when a draw set nothing.
+        // A prediction checked against itself would pass while the render did nothing.
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, view)).unwrap();
+        let drawn = terminal.get_cursor_position().unwrap();
+        if let Some((x, y)) = predicted {
+            assert_eq!(
+                (drawn.x, drawn.y),
+                (x, y),
+                "the draw did not place the cursor where the layout says it goes"
+            );
+        }
+        predicted
+    }
+
+    /// Where the draw *would* put the cursor, taken from the same two functions the draw uses.
+    ///
+    /// Mirrors `draw_pane`: only the focused editable pane goes through `WrapState::render`,
+    /// which is the only place that calls `set_cursor_position`.
+    fn cursor_from_view(view: &View, width: u16, height: u16) -> Option<(u16, u16)> {
+        let (editor, wrap) = match view.focus {
+            Focus::Source => (&view.source, &view.source_wrap),
+            Focus::Instructions => (&view.instructions, &view.instructions_wrap),
+            Focus::Output | Focus::Debug => return None,
+        };
+        let focus = view.focus;
+        let panes = layout::panes(Rect::new(0, 0, width, height));
+        let inner = panes.inner(focus);
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        let cursor = crate::wrap::cursor_position(editor, inner.width);
+        let scroll = wrap.scroll();
+        if cursor.row < scroll || cursor.row >= scroll + usize::from(inner.height) {
+            return None;
+        }
+        let x = inner.x + cursor.column.min(usize::from(inner.width) - 1) as u16;
+        let y = inner.y + (cursor.row - scroll) as u16;
+        Some((x, y))
+    }
+
     fn draw(width: u16, height: u16) -> Buffer {
-        draw_at(&View::new(&config(), Focus::Source), width, height)
+        draw_at(&mut View::new(&config(), Focus::Source), width, height)
     }
 
     fn row(buffer: &Buffer, y: u16) -> String {
@@ -491,7 +588,7 @@ mod tests {
     fn resizing_redistributes_panes_without_panicking() {
         let mut terminal = Terminal::new(TestBackend::new(1, 1)).unwrap();
         let config = config();
-        let view = View::new(&config, Focus::Output);
+        let mut view = View::new(&config, Focus::Output);
 
         // Far bigger and far smaller than the minimum, in both directions.
         for (width, height) in [
@@ -504,7 +601,7 @@ mod tests {
             (1, 40),
         ] {
             terminal.backend_mut().resize(width, height);
-            terminal.draw(|frame| render(frame, &view)).unwrap();
+            terminal.draw(|frame| render(frame, &mut view)).unwrap();
             assert_eq!(
                 terminal.backend().buffer().area,
                 Rect::new(0, 0, width, height)
@@ -515,8 +612,8 @@ mod tests {
     #[test]
     fn focused_read_only_pane_uses_a_different_border() {
         let config = config();
-        let unfocused = draw_at(&View::new(&config, Focus::Source), 80, 24);
-        let focused = draw_at(&View::new(&config, Focus::Output), 80, 24);
+        let unfocused = draw_at(&mut View::new(&config, Focus::Source), 80, 24);
+        let focused = draw_at(&mut View::new(&config, Focus::Output), 80, 24);
         let panes = layout::panes(Rect::new(0, 0, 80, 24));
 
         assert_eq!(corners(&unfocused, panes.output), ["┌", "┐", "└", "┘"]);
@@ -532,7 +629,7 @@ mod tests {
         let panes = layout::panes(Rect::new(0, 0, 80, 24));
 
         for focus in Focus::ALL {
-            let buffer = draw_at(&View::new(&config, focus), 80, 24);
+            let buffer = draw_at(&mut View::new(&config, focus), 80, 24);
             for (other, area) in panes.all() {
                 let style = buffer[(area.x, area.y)].style();
                 if other == focus {
@@ -554,30 +651,44 @@ mod tests {
     }
 
     #[test]
-    fn editable_focused_pane_shows_a_cursor_and_read_only_ones_do_not() {
+    fn the_cursor_is_placed_in_the_focused_editable_pane_only() {
         let config = config();
+        let panes = layout::panes(Rect::new(0, 0, 80, 24));
 
-        let source = draw_at(&View::new(&config, Focus::Source), 80, 24);
-        let instructions = draw_at(&View::new(&config, Focus::Instructions), 80, 24);
-        let output = draw_at(&View::new(&config, Focus::Output), 80, 24);
+        // The cursor is terminal state now, not a glyph appended to the text, so it is read
+        // from the frame rather than searched for in the buffer.
+        for focus in [Focus::Source, Focus::Instructions] {
+            let at = cursor_of(&mut View::new(&config, focus), 80, 24)
+                .unwrap_or_else(|| panic!("{focus:?} placed no cursor"));
+            let inner = panes.inner(focus);
+            assert!(
+                inner.x <= at.0 && at.0 < inner.x + inner.width,
+                "{focus:?} cursor is outside its pane: {at:?} not in {inner:?}"
+            );
+            assert!(
+                inner.y <= at.1 && at.1 < inner.y + inner.height,
+                "{focus:?} cursor row is outside its pane: {at:?} not in {inner:?}"
+            );
+        }
 
-        assert!(contains(&source, CURSOR), "source pane lost its cursor");
-        assert!(
-            contains(&instructions, CURSOR),
-            "instructions pane lost its cursor"
-        );
-        assert!(
-            !contains(&output, CURSOR),
-            "a read-only pane must not show a cursor"
-        );
+        // A read-only pane has no cursor of its own to edit.
+        for focus in [Focus::Output, Focus::Debug] {
+            assert_eq!(
+                cursor_of(&mut View::new(&config, focus), 80, 24),
+                None,
+                "{focus:?} is read-only but placed a cursor"
+            );
+        }
     }
 
     #[test]
-    fn unfocused_editable_pane_shows_no_cursor() {
-        let config = config();
-        let buffer = draw_at(&View::new(&config, Focus::Output), 80, 24);
-
-        assert!(!contains(&buffer, CURSOR), "cursor drawn while unfocused");
+    fn an_unfocused_editable_pane_places_no_cursor() {
+        // Focus on a read-only pane: neither editable pane may show a cursor, or the user
+        // would type into a pane that is not taking input.
+        assert_eq!(
+            cursor_of(&mut View::new(&config(), Focus::Output), 80, 24),
+            None
+        );
     }
 
     #[test]
@@ -599,7 +710,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
 
-        let buffer = draw_at(&View::new(&config, Focus::Source), 40, 10);
+        let buffer = draw_at(&mut View::new(&config, Focus::Source), 40, 10);
         let panes = layout::panes(Rect::new(0, 0, 40, 10));
         let rendered = (panes.source.y + 1..panes.source.y + panes.source.height - 1)
             .map(|y| row(&buffer, y))
@@ -637,7 +748,7 @@ mod tests {
     fn status_line_names_the_selected_harness() {
         let mut config = config();
         config.harness = Harness::Pi;
-        let buffer = draw_at(&View::new(&config, Focus::Source), 80, 10);
+        let buffer = draw_at(&mut View::new(&config, Focus::Source), 80, 10);
 
         assert!(
             row(&buffer, 9).contains("pi"),
@@ -650,7 +761,7 @@ mod tests {
     fn status_line_shows_a_real_session_id_once_one_exists() {
         let mut config = config();
         config.session_id = Some("abc123".to_owned());
-        let buffer = draw_at(&View::new(&config, Focus::Source), 80, 10);
+        let buffer = draw_at(&mut View::new(&config, Focus::Source), 80, 10);
         let status = row(&buffer, 9);
 
         assert!(status.contains("abc123"), "session id missing: {status:?}");
@@ -676,7 +787,7 @@ mod tests {
         let mut view = View::new(&config, Focus::Source);
         view.state = state;
         view.message = message.map(str::to_owned);
-        let buffer = draw_at(&view, width, 10);
+        let buffer = draw_at(&mut view, width, 10);
         row(&buffer, 9)
     }
 
@@ -753,7 +864,7 @@ mod tests {
         let mut view = View::new(&config, Focus::Source);
         view.state = State::Error;
         view.message = Some(long);
-        let buffer = draw_at(&view, 40, 10);
+        let buffer = draw_at(&mut view, 40, 10);
         let panes = layout::panes(Rect::new(0, 0, 40, 10));
         // The row directly above the status line is still the pane bottom border: a wrapped
         // status line would have painted over it.
@@ -834,15 +945,15 @@ mod tests {
             Outcome::Continue,
             "Ctrl+Q quit mid-run without confirming"
         );
-        let message = view.message.as_deref().expect("no confirmation prompt");
+        let message = view.message.clone().expect("no confirmation prompt");
         assert!(
             message.contains("Ctrl+Q"),
             "prompt is not actionable: {message}"
         );
 
         // The prompt has to be readable, which means the status line must carry it.
-        let status = row(&draw_at(&view, 120, 10), 9);
-        assert!(status.contains(message), "prompt not drawn: {status:?}");
+        let status = row(&draw_at(&mut view, 120, 10), 9);
+        assert!(status.contains(&message), "prompt not drawn: {status:?}");
     }
 
     #[test]
@@ -904,10 +1015,6 @@ mod tests {
         assert_eq!(view.handle_key(&release), Outcome::Continue);
     }
 
-    fn contains(buffer: &Buffer, needle: &str) -> bool {
-        (0..buffer.area.height).any(|y| row(buffer, y).contains(needle))
-    }
-
     /// A view with a full debug pane, a known viewport, and the given focus. The viewport is
     /// established by a draw, because a paging key uses the geometry of the last frame.
     fn scrolling_view(focus: Focus) -> View<'static> {
@@ -916,7 +1023,7 @@ mod tests {
         for n in 0..60 {
             view.stream.app(format!("line{n}"));
         }
-        let _ = draw_at(&view, 80, 24);
+        let _ = draw_at(&mut view, 80, 24);
         view
     }
 
@@ -1087,16 +1194,16 @@ mod tests {
     #[test]
     fn the_not_tailing_marker_is_drawn_in_the_debug_pane_title() {
         let mut view = scrolling_view(Focus::Debug);
-        drawn_title(&view);
+        drawn_title(&mut view);
         // Read the title off a real frame rather than the accessor, so the marker is proved
         // to reach the screen and not just the state.
         assert!(
-            !drawn_title(&view).contains("not tailing"),
+            !drawn_title(&mut view).contains("not tailing"),
             "a tailing pane drew the marker"
         );
 
         view.handle_key(&KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
-        let title = drawn_title(&view);
+        let title = drawn_title(&mut view);
         assert!(
             title.contains("not tailing"),
             "a scrolled pane did not draw the marker: {title:?}"
@@ -1104,10 +1211,197 @@ mod tests {
     }
 
     /// The debug pane's title as it appears in a drawn frame.
-    fn drawn_title(view: &View) -> String {
+    fn drawn_title(view: &mut View) -> String {
         let buffer = draw_at(view, 80, 24);
         let panes = layout::panes(Rect::new(0, 0, 80, 24));
         title_at(&buffer, panes.debug)
+    }
+
+    /// A view holding the given text, focused on the given pane, with its wrap state primed by
+    /// a draw so a text operation knows the width it is working in.
+    fn editing_view(focus: Focus, text: &str) -> View<'static> {
+        let config = Box::leak(Box::new(Config {
+            harness: Harness::Claude,
+            model: None,
+            session_id: None,
+            initial_source: text.to_owned(),
+            initial_instructions: text.to_owned(),
+        }));
+        let mut view = View::new(config, focus);
+        let _ = draw_at(&mut view, 80, 24);
+        view
+    }
+
+    fn press_char(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn typing_inserts_into_the_focused_pane_only() {
+        let mut view = editing_view(Focus::Source, "");
+        view.handle_key(&press_char('h'));
+        view.handle_key(&press_char('i'));
+
+        assert_eq!(view.source.text(), "hi");
+        assert_eq!(
+            view.instructions.text(),
+            "",
+            "the unfocused pane was edited"
+        );
+    }
+
+    #[test]
+    fn typing_goes_to_the_instructions_pane_when_it_has_focus() {
+        let mut view = editing_view(Focus::Instructions, "");
+        view.handle_key(&press_char('x'));
+
+        assert_eq!(view.instructions.text(), "x");
+        assert_eq!(view.source.text(), "");
+    }
+
+    #[test]
+    fn enter_and_backspace_edit_the_focused_pane() {
+        let mut view = editing_view(Focus::Source, "");
+        for c in "ab".chars() {
+            view.handle_key(&press_char(c));
+        }
+        view.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        view.handle_key(&press_char('c'));
+        assert_eq!(view.source.text(), "ab\nc");
+
+        view.handle_key(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(view.source.text(), "ab\n");
+    }
+
+    #[test]
+    fn delete_removes_the_character_ahead() {
+        let mut view = editing_view(Focus::Source, "abc");
+        // Seeded text puts the cursor at the end, so move to the start first.
+        for _ in 0..3 {
+            view.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        view.handle_key(&KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+
+        assert_eq!(view.source.text(), "bc");
+    }
+
+    #[test]
+    fn a_read_only_pane_ignores_text_keys() {
+        for focus in [Focus::Output, Focus::Debug] {
+            let mut view = editing_view(focus, "seed");
+            for key in [
+                press_char('x'),
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            ] {
+                view.handle_key(&key);
+            }
+            // Nothing was inserted anywhere, because there is nowhere to insert it.
+            assert_eq!(view.source.text(), "seed", "{focus:?} edited source");
+            assert_eq!(
+                view.instructions.text(),
+                "seed",
+                "{focus:?} edited instructions"
+            );
+        }
+    }
+
+    #[test]
+    fn down_moves_by_visual_row_inside_a_wrapped_line() {
+        // Width 18 inner at 40x10, so this wraps. Down must move one row, not one line.
+        let mut view = editing_view(Focus::Source, "");
+        view.source = Editor::from_text("aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb");
+        view.source.set_cursor(0, 0);
+        let _ = draw_at(&mut view, 40, 10);
+
+        view.handle_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        // One visual row down, and still on logical line 0: the line did not change.
+        assert_eq!(view.source.cursor().line(), 0, "Down changed logical line");
+        assert!(
+            view.source.cursor().column() > 0,
+            "Down did not move within the wrapped line"
+        );
+    }
+
+    #[test]
+    fn a_control_chord_is_not_typed_into_the_buffer() {
+        let mut view = editing_view(Focus::Source, "");
+        // Ctrl+Right switches column; it must not insert and must not edit.
+        view.handle_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+
+        assert_eq!(view.source.text(), "", "a ctrl chord typed a character");
+    }
+
+    #[test]
+    fn tab_still_cycles_focus_while_an_editable_pane_is_focused() {
+        let mut view = editing_view(Focus::Source, "");
+        view.handle_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(view.focus, Focus::Instructions, "Tab stopped cycling");
+        // And it did not insert a tab character.
+        assert_eq!(view.source.text(), "");
+    }
+
+    #[test]
+    fn paging_scrolls_a_focused_editable_pane() {
+        let text = (0..60)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut view = editing_view(Focus::Source, "");
+        view.source = Editor::from_text(&text);
+        // Cursor at the end, so the view is scrolled to the bottom.
+        let _ = draw_at(&mut view, 80, 24);
+        let before = view.source_wrap.scroll();
+
+        view.handle_key(&KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(
+            view.source_wrap.scroll() < before,
+            "PgUp did not scroll the editable pane"
+        );
+    }
+
+    #[test]
+    fn the_cursor_stays_visible_after_typing_at_the_bottom() {
+        let text = (0..60)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut view = editing_view(Focus::Source, "");
+        view.source = Editor::from_text(&text);
+        let _ = draw_at(&mut view, 40, 10);
+
+        // The cursor was positioned in the pane, so the view had scrolled to it.
+        let at = cursor_of(&mut view, 40, 10).expect("no cursor");
+        let panes = layout::panes(Rect::new(0, 0, 40, 10));
+        let inner = panes.inner(Focus::Source);
+        assert!(
+            at.1 < inner.y + inner.height,
+            "cursor left the pane at the bottom: {at:?}"
+        );
+    }
+
+    #[test]
+    fn a_resize_keeps_the_text_and_the_logical_cursor() {
+        let mut view = editing_view(Focus::Source, "");
+        view.source = Editor::from_text("some text that wraps at a small width");
+        view.source.set_cursor(0, 10);
+        let text = view.source.text();
+
+        for (width, height) in [(80, 24), (40, 10), (10, 4), (1, 1), (80, 24)] {
+            let _ = draw_at(&mut view, width, height);
+            assert_eq!(
+                view.source.text(),
+                text,
+                "resize edited the buffer at {width}"
+            );
+            assert_eq!(
+                view.source.cursor(),
+                crate::editor::Cursor::new(0, 10),
+                "resize moved the cursor at {width}"
+            );
+        }
     }
 
     #[test]
@@ -1135,7 +1429,7 @@ mod tests {
 
         let before = {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-            terminal.draw(|frame| render(frame, &view)).unwrap();
+            terminal.draw(|frame| render(frame, &mut view)).unwrap();
             terminal.backend().buffer().clone()
         };
         assert!(before[(panes.source.x, panes.source.y)].style().fg == Some(Color::Yellow));
@@ -1143,7 +1437,7 @@ mod tests {
         view.handle_key(&ctrl(KeyCode::Right));
         let after = {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-            terminal.draw(|frame| render(frame, &view)).unwrap();
+            terminal.draw(|frame| render(frame, &mut view)).unwrap();
             terminal.backend().buffer().clone()
         };
 

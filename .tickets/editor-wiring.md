@@ -1,10 +1,10 @@
 ---
-status: open
+status: in_progress
 priority: 2
 deps: [editor-wrap, pane-routing]
 attachments: []
 created: 2026-11-08T07:46:08Z
-updated: 2026-11-08T07:46:16Z
+updated: 2026-11-08T07:52:47Z
 ---
 # Wire Editor and wrap into the editable panes
 
