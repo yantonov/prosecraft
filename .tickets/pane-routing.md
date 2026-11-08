@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: [editor-wrap, process-spawn]
 attachments: []
 created: 2026-11-07T15:33:47Z
-updated: 2026-11-08T07:20:13Z
+updated: 2026-11-08T07:24:41Z
+closed-at: 2026-11-08T07:24:41Z
 ---
 # Output pane from final text, debug pane from stream
 
