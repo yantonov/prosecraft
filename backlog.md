@@ -1,5 +1,4 @@
 ## Active
-- [ ] Resolve where raw text goes when a marker is missing #spec-marker-fallback
 - [ ] Re-audit the dead_code allowances now the backlog is closed #dead-code-audit
 - [ ] Investigate claude returning an empty result field #empty-result
 
@@ -22,6 +21,7 @@
 - [x] Apache 2.0 licence: Yury Antonov, 2026 #license-apache <- [tui-dummy]
 - [x] Makefile install target: release build, stamp git hash, copy to ~/.local/bin #zzfl3
 - [x] Wire Editor and wrap into the editable panes #editor-wiring <- [editor-wrap, pane-routing]
+- [x] Resolve where raw text goes when a marker is missing #spec-marker-fallback
 - [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]

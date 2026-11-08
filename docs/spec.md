@@ -299,9 +299,10 @@ Extraction, applied once per run to the terminal text:
 3. If both markers are present, the result is **success** regardless of what surrounds
    them. Everything outside is discarded, which is the point of the protocol.
 4. **Fallback when a marker is missing:** the run is an **error**, not a guess. Show the raw
-   terminal text in the output pane and set state `error` with "model did not use the output
-   markers". Never fall back to trimming or preamble-stripping: that is precisely the
-   heuristic the markers exist to remove.
+   terminal text in the **debug pane** — never in the output pane, which holds final text only
+   (constraint 5) and stays as cleared on spawn (§5 step 5) — and set state `error` with "model
+   did not use the output markers". Never fall back to trimming or preamble-stripping: that is
+   precisely the heuristic the markers exist to remove.
 5. Trim surrounding whitespace inside the extracted text; preserve internal newlines
    verbatim. Measured: paragraphs inside the markers keep their blank lines.
 6. If the extracted text contains a tool-invocation block (`<invoke name=…>`), the run is an

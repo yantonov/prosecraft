@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 2
 deps: []
 attachments: []
 created: 2026-11-08T10:40:00Z
-updated: 2026-11-08T10:40:00Z
+updated: 2026-11-08T10:12:54Z
+closed-at: 2026-11-08T10:12:54Z
 ---
 # Resolve where raw text goes when a marker is missing
 
@@ -61,3 +62,24 @@ tests.
 Changing the marker protocol, falling back to trimming or preamble-stripping, or treating a
 missing marker as success. All three are settled by §6.1a and are not in question here — this
 ticket is only about *where the raw text is displayed*.
+
+## Resolved 2026-11-08: option (a), approved by the human
+
+§6.1a step 4 now says the raw text goes to the **debug pane** and explicitly that the output
+pane stays as cleared on spawn, citing constraint 5 and §5 step 5. Exactly one paragraph
+changed; the diff was checked against a saved baseline.
+
+All four statements now agree:
+
+- §6.1a step 4 — debug pane, output pane untouched
+- §5 step 5 — output pane stays empty for the run
+- §8 table — debug pane holds the full output (no change needed)
+- AGENTS.md constraint 5 — output pane gets final text only (no change needed)
+
+No code change was required: `marker-extract` had already implemented the majority position,
+and `panes::tests::a_marker_failure_is_an_error_and_never_writes_the_output_pane` already
+asserts it, along with `StreamState::raw` putting the text in the debug pane under its own
+label.
+
+Constraint 5 was NOT loosened, so it is unchanged and the spec's Decisions section needs no
+amendment.
