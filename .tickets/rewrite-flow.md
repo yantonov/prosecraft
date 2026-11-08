@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: [clipboard, marker-extract]
 attachments: []
 created: 2026-11-07T15:33:47Z
-updated: 2026-11-08T08:21:46Z
+updated: 2026-11-08T08:21:52Z
+closed-at: 2026-11-08T08:21:52Z
 ---
 # Rewrite validation and state machine
 
