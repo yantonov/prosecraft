@@ -1,4 +1,5 @@
 ## Active
+- [ ] jcfm2 #jcfm2
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]

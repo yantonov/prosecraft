@@ -73,7 +73,7 @@ Rules:
 │  editable                      ││  read-only, rewritten text      │
 │                                ││                                │
 ├ instructions ──────────────────┤├ process ───────────────────────┤
-│ editable, ~5 lines             ││ read-only, stdout+stderr, ~8    │
+│ editable, ~8 lines             ││ read-only, stdout+stderr, ~8    │
 └────────────────────────────────┘└────────────────────────────────┘
  source │ prose… │ idle          [Ctrl+R] rewrite  [Tab] focus  [Ctrl+Q] quit
 ```
@@ -95,7 +95,9 @@ Four panes, all focusable. Two columns, 50/50.
   user has not scrolled up in it, and stops tailing once they have (a marker shows
   "not tailing").
 - Every pane soft-wraps. Widths are recalculated on resize; text is never truncated.
-- Instructions pane height: `min(5, 25% of column)`, minimum 3 lines.
+- Both bottom panes (`instructions`, `debug`) share one height: `min(8, column / 3)`,
+  minimum 3 lines, capped at 8. The same formula on equal-height columns puts their top
+  border on one row, so the two halves of the frame line up.
 - Status line: harness name, session id (short form, `—` before the first rewrite), state
   (`idle` / `running` / `error`), then the key hints.
 

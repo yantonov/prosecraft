@@ -6,14 +6,15 @@
 
 use ratatui::layout::Rect;
 
-/// Instructions pane: `min(5, 25% of the column)` (spec §4), then floored at
-/// [`BOTTOM_MIN`]. The divisor is the 25% and the cap the 5.
-pub const INSTRUCTIONS: Share = Share { divisor: 4, cap: 5 };
-
-/// Debug pane. The spec pins only the instructions formula; its drawing gives the debug
-/// pane about a third of a 24-row terminal and marks it "~8", so a third reproduces the
-/// drawing and 8 is the ceiling that stops it eating the output pane on a tall screen.
-pub const DEBUG: Share = Share { divisor: 3, cap: 8 };
+/// The bottom pane of either column, floored at [`BOTTOM_MIN`]. The spec's drawing gives
+/// the debug pane about a third of a 24-row terminal and marks it "~8", so a third
+/// reproduces the drawing and 8 is the ceiling that stops it eating the top pane on a tall
+/// screen.
+///
+/// One share for both columns is what keeps the two bottom panes the same height: they
+/// split columns of equal height by the same formula, so the border between top and bottom
+/// lands on one row across the frame.
+pub const BOTTOM: Share = Share { divisor: 3, cap: 8 };
 
 /// A bottom pane's proportional height: `min(cap, column / divisor)`.
 #[derive(Debug, Clone, Copy)]
@@ -156,8 +157,8 @@ pub fn panes(area: Rect) -> Panes {
         ..body
     };
 
-    let (source, instructions) = split_column(left, INSTRUCTIONS);
-    let (output, debug) = split_column(right, DEBUG);
+    let (source, instructions) = split_column(left, BOTTOM);
+    let (output, debug) = split_column(right, BOTTOM);
 
     Panes {
         source,
@@ -330,11 +331,11 @@ mod tests {
 
     #[test]
     fn panes_stack_in_spec_order_at_80x24() {
-        // Body is 23 rows: 25% floors to 5, which is also the instructions cap.
+        // Body is 23 rows: a third floors to 7, which is under the cap of 8.
         let panes = panes(area(80, 24));
 
-        assert_eq!(panes.source, Rect::new(0, 0, 40, 18));
-        assert_eq!(panes.instructions, Rect::new(0, 18, 40, 5));
+        assert_eq!(panes.source, Rect::new(0, 0, 40, 16));
+        assert_eq!(panes.instructions, Rect::new(0, 16, 40, 7));
         assert_eq!(panes.output, Rect::new(40, 0, 40, 16));
         assert_eq!(panes.debug, Rect::new(40, 16, 40, 7));
         assert_eq!(panes.status, Rect::new(0, 23, 80, 1));
@@ -344,48 +345,29 @@ mod tests {
     }
 
     #[test]
-    fn instructions_height_is_min_5_25_percent_floored_at_3() {
-        // (terminal height, expected instructions height)
-        let cases = [
-            (24, 5), // 23 body rows -> 25% = 5
-            (40, 5), // 39 body rows -> 25% = 9, capped at 5
-            (60, 5), // 59 body rows -> 25% = 14, capped at 5
-            (10, 3), // 9 body rows  -> 25% = 2, floored to 3
-            (8, 3),  // 7 body rows  -> 25% = 1, floored to 3
-            (5, 3),  // 4 body rows  -> floor wins over a 1-row share
-            (4, 3),  // 3 body rows  -> floor is the whole column
-            (3, 2),  // 2 body rows  -> clamped to what exists
-            (2, 1),  // 1 body row   -> clamped to what exists
-            (1, 0),  // status line takes the only row
-        ];
-
-        for (height, expected) in cases {
-            let panes = panes(area(80, height));
-            assert_eq!(
-                panes.instructions.height, expected,
-                "instructions height at 80x{height}"
-            );
-            assert_eq!(
-                panes.source.height + panes.instructions.height,
-                height.saturating_sub(1),
-                "column rows must be fully and exactly distributed at 80x{height}"
-            );
-        }
-    }
-
-    #[test]
-    fn debug_height_is_min_8_third_floored_at_3() {
-        // (terminal height, expected debug height): a third reproduces the spec drawing.
+    fn both_bottom_panes_are_min_8_third_floored_at_3() {
+        // (terminal height, expected bottom height): a third reproduces the spec drawing.
         let cases = [
             (24, 7), // 23 body rows -> 23/3 = 7
             (40, 8), // 39 body rows -> 13, capped at 8
+            (60, 8), // 59 body rows -> 19, capped at 8
             (10, 3), // 9 body rows  -> 3
             (5, 3),  // 4 body rows  -> 1, floored to 3
         ];
 
         for (height, expected) in cases {
             let panes = panes(area(80, height));
-            assert_eq!(panes.debug.height, expected, "debug height at 80x{height}");
+            for (focus, rect) in [
+                (Focus::Instructions, panes.instructions),
+                (Focus::Debug, panes.debug),
+            ] {
+                assert_eq!(rect.height, expected, "{focus:?} height at 80x{height}");
+            }
+            assert_eq!(
+                panes.source.height + panes.instructions.height,
+                height.saturating_sub(1),
+                "column rows must be fully and exactly distributed at 80x{height}"
+            );
             assert_eq!(
                 panes.output.height + panes.debug.height,
                 height.saturating_sub(1),
@@ -395,12 +377,29 @@ mod tests {
     }
 
     #[test]
+    fn the_two_bottom_panes_share_a_height_and_a_top_edge_at_every_size() {
+        for width in [1, 2, 3, 7, 8, 9, 20, 40, 79, 80, 81] {
+            for height in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 24, 40, 60] {
+                let panes = panes(area(width, height));
+                assert_eq!(
+                    panes.instructions.height, panes.debug.height,
+                    "bottom panes differ in height at {width}x{height}"
+                );
+                assert_eq!(
+                    panes.instructions.y, panes.debug.y,
+                    "the border between top and bottom is not one row at {width}x{height}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tall_terminal_caps_both_bottom_panes() {
         let panes = panes(area(80, 60));
 
-        assert_eq!(panes.instructions.height, 5);
+        assert_eq!(panes.instructions.height, 8);
         assert_eq!(panes.debug.height, 8);
-        assert_eq!(panes.source.height, 54);
+        assert_eq!(panes.source.height, 51);
         assert_eq!(panes.output.height, 51);
     }
 

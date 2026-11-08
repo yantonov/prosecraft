@@ -840,7 +840,7 @@ mod tests {
         // Spec order, expressed as positions: source over instructions on the left,
         // output over debug on the right.
         assert_eq!((panes.source.x, panes.source.y), (0, 0));
-        assert_eq!((panes.instructions.x, panes.instructions.y), (0, 18));
+        assert_eq!((panes.instructions.x, panes.instructions.y), (0, 16));
         assert_eq!((panes.output.x, panes.output.y), (40, 0));
         assert_eq!((panes.debug.x, panes.debug.y), (40, 16));
     }
@@ -882,7 +882,7 @@ mod tests {
         assert_eq!(title_at(&buffer, panes.output), "output");
         assert_eq!(title_at(&buffer, panes.debug), "debug");
 
-        // 9 body rows: 25% floors to 2, so the floor-3 rule decides the instructions height.
+        // 9 body rows: a third floors to 3, which is also the floor.
         assert_eq!(panes.instructions.height, 3);
         assert_eq!(panes.source.height, 6);
     }
