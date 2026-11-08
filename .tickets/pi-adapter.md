@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 3
 deps: [harness-trait, session-lifecycle]
 attachments: []
 created: 2026-11-07T15:33:50Z
-updated: 2026-11-08T09:55:47Z
+updated: 2026-11-08T09:56:02Z
+closed-at: 2026-11-08T09:56:02Z
 ---
 # pi adapter
 

@@ -1,5 +1,4 @@
 ## Active
-- [>] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
@@ -20,6 +19,7 @@
 - [x] Apache 2.0 licence: Yury Antonov, 2026 #license-apache <- [tui-dummy]
 - [x] Makefile install target: release build, stamp git hash, copy to ~/.local/bin #zzfl3
 - [x] Wire Editor and wrap into the editable panes #editor-wiring <- [editor-wrap, pane-routing]
+- [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
 - [x] Pin LF line endings with .gitattributes #gitattributes <- [tui-dummy]
