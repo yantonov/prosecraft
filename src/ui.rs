@@ -415,6 +415,9 @@ impl<'a> View<'a> {
         match machine.start(&task, present, &mut self.stream, std::time::Instant::now()) {
             Ok(()) => {
                 self.state = State::Running;
+                // Spec §4: the result is what the user asked for, so focus goes to the pane it
+                // will land in rather than staying on the pane they were last typing into.
+                self.focus = Focus::Output;
                 self.message = None;
                 self.sync_session();
             }
@@ -765,7 +768,9 @@ fn culprit(refusal: Refusal, current: Focus) -> Focus {
     match refusal {
         Refusal::NoInstructions => Focus::Instructions,
         Refusal::NoSource => Focus::Source,
-        // Neither of these is fixed in a pane, so focus is left where the user had it.
+        // Neither of these is fixed in a pane, so focus is left where the user had it: a
+        // refusal happens before a run exists, and the move to the output pane is the
+        // successful start's (spec §4).
         Refusal::HarnessGone | Refusal::AlreadyRunning => current,
     }
 }
@@ -1972,6 +1977,51 @@ mod tests {
         (view, handle)
     }
 
+    /// Makes the sandbox resolve a harness, so a `Ctrl+R` reaches the machine's spawner.
+    ///
+    /// `rewrite` re-checks the binary through the real resolver (spec §5 step 1, §3), and the
+    /// test box either has a real `claude` or does not. So `PATH` is pointed at a temporary
+    /// directory holding a placeholder named what the view's harness is called — the name the
+    /// resolver looks for is `binary_name()`, not the program the spawner gets. The spawner
+    /// itself is scripted in `rewrite_view`, so the placeholder is never executed.
+    ///
+    /// The old `PATH` is put back on drop. Mutating it at all is safe here only because
+    /// nothing else in this binary resolves against the process environment: the resolver's
+    /// own tests call `lookup_in` with the environment passed in.
+    struct FakeHarness(std::ffi::OsString);
+
+    impl Drop for FakeHarness {
+        fn drop(&mut self) {
+            unsafe { std::env::set_var("PATH", &self.0) };
+        }
+    }
+
+    fn with_harness_on_path(view: View<'static>) -> (View<'static>, FakeHarness) {
+        let dir = std::env::temp_dir().join(format!(
+            "prosecraft-fake-harness-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create the fake harness directory");
+        let name = if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        };
+        let placeholder = dir.join(name);
+        std::fs::write(&placeholder, "never executed; the spawner is scripted")
+            .expect("write the placeholder");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&placeholder, std::fs::Permissions::from_mode(0o755))
+                .expect("mark the placeholder executable");
+        }
+        let guard = FakeHarness(std::env::var_os("PATH").unwrap_or_default());
+        unsafe { std::env::set_var("PATH", &dir) };
+        (view, guard)
+    }
+
     #[test]
     fn ctrl_c_copies_the_focused_pane_instead_of_quitting() {
         // Every focus, idle state: the key this replaces quit from all of them.
@@ -2747,6 +2797,55 @@ mod tests {
 
         assert_eq!(view.focus, Focus::Instructions, "Tab did not change focus");
         assert!(view.tick(), "focus moved and asked for no redraw");
+    }
+
+    #[test]
+    fn a_started_rewrite_moves_focus_to_the_output_pane() {
+        // Spec §4: the next thing the user reads is the result, so the pane that will hold it
+        // takes the focus. Driven through `Ctrl+R` rather than a direct `machine.start`, so the
+        // whole path — the resolver re-check included — is the one the user takes.
+        let (view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+        let (mut view, _path) = with_harness_on_path(view);
+
+        view.handle_key(&ctrl_char('r'));
+
+        assert_eq!(view.state, State::Running, "Ctrl+R did not start a run");
+        assert_eq!(
+            view.focus,
+            Focus::Output,
+            "a started rewrite left focus on the pane the user was typing in"
+        );
+    }
+
+    #[test]
+    fn ctrl_r_while_running_leaves_focus_where_it_was() {
+        // The move to the output pane is the *started* rewrite's; a refusal must not also do
+        // it, or a live run would silently take the focus off whatever the user was reading.
+        let (view, _) = rewrite_view(Focus::Debug, Vec::new(), None);
+        let (mut view, _path) = with_harness_on_path(view);
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+            transport: crate::harness::Transport::Argv,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        view.handle_key(&ctrl_char('r'));
+
+        assert_eq!(view.focus, Focus::Debug, "a refusal moved focus");
+        assert_eq!(
+            view.message.as_deref(),
+            Some("a rewrite is already running"),
+            "the refusal was not reported"
+        );
+        assert_eq!(view.state, State::Running, "the live run was disturbed");
     }
 
     #[test]

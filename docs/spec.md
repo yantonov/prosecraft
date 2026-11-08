@@ -91,6 +91,11 @@ Four panes, all focusable. Two columns, 50/50.
   in reading order. `Ctrl+Left` / `Ctrl+Right` jump to the other column, preserving row;
   `Ctrl+Up` / `Ctrl+Down` jump to the other row, preserving column, and do not wrap at the
   edge.
+- A `Ctrl+R` that starts a rewrite sets focus to the `output` pane. Asking for a rewrite is
+  the end of typing: the next thing the user does is read the result, and the pane that will
+  hold it is where they are looking. The debug pane stays one `Ctrl+Up` away, which is what
+  keeps cancelling reachable. A refused `Ctrl+R` does not go here; it moves focus to the
+  culprit (§5).
 - The focused pane shows a cursor (editable) or a highlighted border (read-only), and
   scrolls to keep the cursor/offset in view.
 - `output` and `debug` keep their own scroll offsets. The `debug` pane auto-tails while the
@@ -127,7 +132,7 @@ Four panes, all focusable. Two columns, 50/50.
 
 ```
 idle ──Ctrl+R──> validating ──fail──> validation error (stays idle, focus moves to culprit)
-                      │ok
+                      │ok: focus → output
                       v
              running ──(every stdout/stderr line)──> debug pane only
                       │
