@@ -190,7 +190,7 @@ fn classify_stream_event(json: &Json) -> Event {
 /// prose. Measured cause (spec §6.1a step 6): with tools denied the model prints the call
 /// as text, and with a permission prompt pending the run stalls; either way nothing
 /// executed, and neither is a rewrite.
-fn carries_tool_use(value: &Json) -> bool {
+pub(super) fn carries_tool_use(value: &Json) -> bool {
     match value {
         Json::Object(fields) => fields.iter().any(|(key, value)| match key.as_str() {
             "type" => matches!(
@@ -220,7 +220,7 @@ fn carries_tool_use(value: &Json) -> bool {
 /// id is a name the harness looks a session up by: not a secret, not a token, and nothing
 /// is gained by predicting it. A `uuid` dependency would buy cryptographic quality this use
 /// has no need for, and adding a dependency is on the project's escalate list.
-fn new_uuid_v4() -> String {
+pub(super) fn new_uuid_v4() -> String {
     let mut bytes = [0u8; 16];
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -254,7 +254,7 @@ fn new_uuid_v4() -> String {
 
 /// A JSON value, only as much as one claude stdout line needs.
 #[derive(Debug, Clone, PartialEq)]
-enum Json {
+pub(super) enum Json {
     Null,
     Bool(bool),
     /// The text is kept only so `PartialEq` distinguishes values; nothing reads a number.
@@ -266,7 +266,15 @@ enum Json {
 }
 
 impl Json {
-    fn as_str(&self) -> Option<&str> {
+    /// The items of an array, or `None` for any other value.
+    pub(super) fn as_array(&self) -> Option<&[Json]> {
+        match self {
+            Self::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    pub(super) fn as_str(&self) -> Option<&str> {
         match self {
             Self::Str(text) => Some(text),
             _ => None,
@@ -284,7 +292,7 @@ impl Json {
 }
 
 /// The value under `key` in an object; `None` for a non-object or an absent key.
-fn field<'a>(value: &'a Json, key: &str) -> Option<&'a Json> {
+pub(super) fn field<'a>(value: &'a Json, key: &str) -> Option<&'a Json> {
     match value {
         Json::Object(fields) => fields
             .iter()
@@ -300,7 +308,7 @@ fn field<'a>(value: &'a Json, key: &str) -> Option<&'a Json> {
 /// truncated line, or a second object appended to the first. The caller maps that to
 /// [`Event::Junk`], so a malformed line is a diagnosable debug entry and never an error
 /// (spec §6).
-fn parse(line: &str) -> Option<Json> {
+pub(super) fn parse(line: &str) -> Option<Json> {
     let mut parser = Parser {
         bytes: line.as_bytes(),
         at: 0,

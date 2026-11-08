@@ -146,13 +146,12 @@ impl Drop for Tui {
 /// The adapter for the harness chosen on the command line.
 ///
 /// `--harness` selects a binary, and each adapter is that binary's argv and event vocabulary.
-/// The pi adapter is the `pi-adapter` ticket and is not written yet, so `pi` currently runs
-/// through the claude adapter: the startup path accepts it because the lookup is the same, and
-/// refusing here would break `--harness pi --help`. The debug pane will show junk rather than
-/// a rewrite, which is honest about the state of that adapter.
+/// The two are not interchangeable: claude resumes with `--resume` while pi keeps
+/// `--session-id`, and their event vocabularies share no type names.
 fn adapter_for(harness: cli::Harness) -> Box<dyn harness::HarnessAdapter> {
     match harness {
-        cli::Harness::Claude | cli::Harness::Pi => Box::new(harness::claude::Claude),
+        cli::Harness::Claude => Box::new(harness::claude::Claude),
+        cli::Harness::Pi => Box::new(harness::pi::Pi),
     }
 }
 

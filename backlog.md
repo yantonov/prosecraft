@@ -1,5 +1,5 @@
 ## Active
-- [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
+- [>] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
