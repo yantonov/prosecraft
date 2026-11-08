@@ -28,9 +28,7 @@ use crate::process::{self, Line, Outcome};
 
 /// The wall-clock limit for one run, re-exported so callers name it in one place (spec §7).
 ///
-/// Nothing reads this yet: the timeout is applied inside [`process::Run`], and the ticket that
-/// surfaces it to the UI is `robustness`. The test below pins the value so the two cannot drift.
-#[allow(dead_code)]
+/// Applied by [`Machine`], and injectable so a test does not have to wait it out.
 pub const DEFAULT_TIMEOUT: Duration = process::DEFAULT_TIMEOUT;
 
 /// Why a rewrite was refused before it started.
@@ -70,12 +68,8 @@ pub trait Child {
     fn drain(&mut self) -> Vec<Line>;
     /// How the run ended, once, or `None` while it is still going.
     fn poll(&mut self) -> Option<Outcome>;
-    /// Asks the child to stop. Not required to be immediate.
-    ///
-    /// Unused until `robustness` wires `Ctrl+C` mid-run; the fake children implement it and
-    /// one test drives it, so the contract is exercised even though production does not call
-    /// it yet.
-    #[allow(dead_code)]
+    /// Asks the child to stop. Not required to be immediate: the outcome arrives through the
+    /// next [`Child::poll`], which is what makes a cancel look like any other ending.
     fn cancel(&mut self);
 }
 
@@ -94,7 +88,7 @@ impl Child for process::Run {
 }
 
 /// Creates a child from an invocation. Injected so a test can supply a fake.
-pub type Spawner = Box<dyn Fn(&Invocation) -> std::io::Result<Box<dyn Child>>>;
+pub type Spawner = Box<dyn Fn(&Invocation, Duration) -> std::io::Result<Box<dyn Child>>>;
 
 /// What one [`Machine::tick`] did, for the caller to draw or to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +113,9 @@ pub struct Machine {
     session: Option<String>,
     adapter: Box<dyn HarnessAdapter>,
     spawner: Spawner,
+    /// Wall-clock limit for each run. A field rather than a constant so a test can pass
+    /// hundreds of milliseconds instead of waiting out the 180 s default (spec §7).
+    timeout: Duration,
 }
 
 impl std::fmt::Debug for Machine {
@@ -138,10 +135,27 @@ impl Machine {
             child: None,
             session: None,
             adapter,
-            spawner: Box::new(|invocation| {
-                process::Run::spawn(invocation).map(|run| Box::new(run) as Box<dyn Child>)
+            spawner: Box::new(|invocation, timeout| {
+                process::Run::spawn_with_timeout(invocation, timeout)
+                    .map(|run| Box::new(run) as Box<dyn Child>)
             }),
+            timeout: DEFAULT_TIMEOUT,
         }
+    }
+
+    /// The wall-clock limit applied to each run started from here.
+    ///
+    /// The timeout is a property of the machine rather than a constant inside the runner
+    /// because the ticket that tests it must not wait three minutes: injecting it here keeps
+    /// the production path and the tested path the same code.
+    ///
+    /// Used by the tests that would otherwise wait out the default, and by `main` once a
+    /// `--timeout` flag exists. Kept public because the alternative — a test-only constructor
+    /// — would leave the production timeout untested.
+    #[allow(dead_code)]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// A machine that spawns whatever `spawner` returns, for tests.
@@ -152,6 +166,7 @@ impl Machine {
             session: None,
             adapter,
             spawner,
+            timeout: DEFAULT_TIMEOUT,
         }
     }
 
@@ -225,7 +240,7 @@ impl Machine {
             .build(&built)
             .map_err(|_| Refusal::HarnessGone)?;
 
-        let child = match (self.spawner)(&invocation) {
+        let child = match (self.spawner)(&invocation, self.timeout) {
             Ok(child) => child,
             // A spawn failure is a runtime failure, not a validation one: the binary existed a
             // moment ago. §8 puts it in the error state with the reason on the debug pane.
@@ -274,12 +289,17 @@ impl Machine {
 
     /// Asks a live run to stop. The outcome arrives through the next [`Machine::tick`].
     ///
-    /// `Ctrl+C` mid-run is the `robustness` ticket, so nothing calls this yet; the tests drive
-    /// it to prove the call reaches the child.
-    #[allow(dead_code)]
-    pub fn cancel(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            child.cancel();
+    /// `Ctrl+C` mid-run: ask the live run to stop (spec §5, §7).
+    ///
+    /// Returns whether anything was running, so the caller can tell a cancel from a no-op
+    /// without asking twice.
+    pub fn cancel(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(child) => {
+                child.cancel();
+                true
+            }
+            None => false,
         }
     }
 }
@@ -387,7 +407,7 @@ mod tests {
         let handed = shared.clone();
         let machine = Machine::with_spawner(
             Box::new(Claude),
-            Box::new(move |_| {
+            Box::new(move |_, _| {
                 Ok(Box::new(Scripted {
                     inner: handed.clone(),
                 }) as Box<dyn Child>)
@@ -517,7 +537,7 @@ mod tests {
         let recorder = seen.clone();
         let mut machine = Machine::with_spawner(
             Box::new(Claude),
-            Box::new(move |invocation| {
+            Box::new(move |invocation, _| {
                 recorder.borrow_mut().push(invocation.args.clone());
                 Ok(Box::new(Scripted {
                     inner: std::rc::Rc::new(std::cell::RefCell::new(Fake::new(
@@ -578,7 +598,7 @@ mod tests {
         let recorder = seen.clone();
         let mut machine = Machine::with_spawner(
             Box::new(Claude),
-            Box::new(move |invocation| {
+            Box::new(move |invocation, _| {
                 recorder.borrow_mut().push(invocation.args.clone());
                 Ok(Box::new(Scripted {
                     inner: std::rc::Rc::new(std::cell::RefCell::new(Fake::new(
@@ -792,7 +812,7 @@ mod tests {
     fn a_spawn_failure_is_reported_and_leaves_the_machine_idle() {
         let mut machine = Machine::with_spawner(
             Box::new(Claude),
-            Box::new(|_| Err(std::io::Error::other("no such binary"))),
+            Box::new(|_, _| Err(std::io::Error::other("no such binary"))),
         );
         let mut stream = stream();
 
@@ -836,6 +856,71 @@ mod tests {
         };
 
         assert_eq!(session_from(&invocation), None);
+    }
+
+    #[test]
+    fn a_run_that_never_ends_is_killed_at_the_injected_timeout() {
+        // The real runner, not a fake: the timeout is the one behaviour that only a genuine
+        // child can prove, because it is the runner that has to notice the deadline. The
+        // fixture spins on builtins, so nothing outlives the kill and the test costs ~200ms
+        // rather than the 180 s default.
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hangs.sh");
+        assert!(fixture.is_file(), "fixture missing: {}", fixture.display());
+
+        let spawned = std::cell::RefCell::new(Some(Invocation {
+            program: "sh".to_owned(),
+            args: vec![fixture.to_string_lossy().into_owned()],
+            stdin: None,
+        }));
+        // Drive the real spawner with the fixture's argv rather than the adapter's, so the
+        // test does not depend on `claude` being installed.
+        let machine_spawner = std::rc::Rc::new(spawned);
+        let mut machine = Machine::with_spawner(Box::new(Claude), {
+            let argv = machine_spawner.clone();
+            Box::new(move |_invocation, timeout| {
+                let invocation = argv
+                    .borrow_mut()
+                    .take()
+                    .unwrap_or_else(|| panic!("the fixture should be spawned once"));
+                process::Run::spawn_with_timeout(&invocation, timeout)
+                    .map(|run| Box::new(run) as Box<dyn Child>)
+            })
+        })
+        .with_timeout(Duration::from_millis(200));
+
+        let mut stream = stream();
+        let started = Instant::now();
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .expect("the fixture should start");
+
+        // Tick until the run ends, bounded so a hang fails rather than stalls.
+        let mut ended = false;
+        while started.elapsed() < Duration::from_secs(10) {
+            if let Tick::Finished(_) = machine.tick(&mut stream) {
+                ended = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(ended, "the run was never killed");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "killed before the deadline: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the injected timeout was not honoured: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            stream.debug_text().contains("timed out"),
+            "the timeout was not reported: {}",
+            stream.debug_text()
+        );
     }
 
     #[test]

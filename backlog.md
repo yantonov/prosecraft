@@ -1,6 +1,6 @@
 ## Active
 - [ ] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
-- [ ] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
+- [>] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]

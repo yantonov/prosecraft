@@ -26,10 +26,6 @@ use crate::wrap::WrapState;
 /// ticket only has to get the prompt onto the status line.
 const CONFIRM_QUIT: &str = "press Ctrl+Q again to quit";
 
-/// Shown for `Ctrl+C` mid-rewrite. Spec §4 makes that key a cancel rather than a quit, and
-/// cancelling is the robustness ticket, so the key is ignored here and says so.
-const CANCEL_UNIMPLEMENTED: &str = "Ctrl+C cancels, but cancel is not implemented yet";
-
 /// The state word on the status line (spec §4: `idle` / `running` / `error`).
 ///
 /// Three values and no transitions: the rewrite flow that drives them is a later ticket, so
@@ -91,6 +87,8 @@ pub struct View<'a> {
     /// read-only paste refusal, which is the only thing that needs to interrupt without
     /// changing the status line.
     pub toast: Option<String>,
+    /// Whether a quit is waiting for its second `Ctrl+Q` (spec §4: confirm while running).
+    pub quit_armed: bool,
     /// The rewrite state machine (spec §5). Owned by the view so a key press and a tick are the
     /// only two things that can move a run along, and both go through here.
     pub machine: Option<Box<Machine>>,
@@ -130,6 +128,7 @@ impl<'a> View<'a> {
             stream: StreamState::new(),
             clipboard: Box::new(crate::clipboard::Disabled),
             toast: None,
+            quit_armed: false,
             machine: None,
             session: config.session_id.clone(),
             state: State::Idle,
@@ -276,11 +275,18 @@ impl<'a> View<'a> {
     /// `Ctrl+Q` from any focus state: quit, unless a rewrite is running and spec §4 asks for
     /// a confirmation first.
     fn request_quit(&mut self) -> Outcome {
-        if self.state == State::Running {
-            self.message = Some(CONFIRM_QUIT.to_owned());
-            return Outcome::Continue;
+        if self.state != State::Running {
+            return Outcome::Quit;
         }
-        Outcome::Quit
+        // A run is live, so the first press asks and the second answers (spec §4: "Quit;
+        // confirm if a rewrite is running"). The armed flag is the confirmation itself, so
+        // there is no separate modal to get out of.
+        if self.quit_armed {
+            return Outcome::Quit;
+        }
+        self.quit_armed = true;
+        self.message = Some(CONFIRM_QUIT.to_owned());
+        Outcome::Continue
     }
 
     /// `Ctrl+C`: quit when there is nothing to cancel, otherwise cancel the harness — which
@@ -289,7 +295,21 @@ impl<'a> View<'a> {
     fn interrupt(&mut self) -> Outcome {
         match self.state {
             State::Running => {
-                self.message = Some(CANCEL_UNIMPLEMENTED.to_owned());
+                // Spec §4: while running, Ctrl+C cancels rather than quits. The child is asked
+                // to stop; the cancelled outcome arrives through the next tick, so this must
+                // not also change the state word now or the run would look finished before it
+                // has been reaped.
+                let asked = self
+                    .machine
+                    .as_mut()
+                    .is_some_and(|machine| machine.cancel());
+                self.message = Some(if asked {
+                    "cancelling".to_owned()
+                } else {
+                    // A live state with no child is a bug, not a user-visible case; saying so
+                    // beats a silent no-op.
+                    "nothing to cancel".to_owned()
+                });
                 Outcome::Continue
             }
             State::Idle | State::Error => Outcome::Quit,
@@ -1969,7 +1989,15 @@ mod tests {
             }
 
             fn poll(&mut self) -> Option<RunOutcome> {
-                self.state.borrow().outcome.clone()
+                // Only report an outcome once the script is spent, so a test that ticks
+                // several times gets several streaming ticks before the ending. A fake that
+                // ended on the first poll would make "still streaming" untestable.
+                let state = self.state.borrow();
+                if state.lines.is_empty() {
+                    state.outcome.clone()
+                } else {
+                    None
+                }
             }
 
             fn cancel(&mut self) {
@@ -1985,7 +2013,7 @@ mod tests {
         let handed = state.clone();
         let machine = crate::rewrite::Machine::with_spawner(
             Box::new(crate::harness::claude::Claude),
-            Box::new(move |_| {
+            Box::new(move |_, _| {
                 Ok(Box::new(Scripted {
                     state: handed.clone(),
                 }) as Box<dyn crate::rewrite::Child>)
@@ -2368,6 +2396,289 @@ mod tests {
             !status.contains('—'),
             "the em-dash stayed after a session existed: {status:?}"
         );
+    }
+
+    #[test]
+    fn ctrl_c_while_running_cancels_instead_of_quitting() {
+        let (mut view, state) = rewrite_view(Focus::Source, vec![Vec::new()], None);
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        assert_eq!(
+            view.handle_key(&ctrl_char('c')),
+            Outcome::Continue,
+            "Ctrl+C quit while a run was live"
+        );
+
+        assert_eq!(state.borrow().cancels, 1, "the child was not asked to stop");
+        // The state word waits for the cancelled outcome to come back through the tick: the
+        // run has been asked to stop, not reaped.
+        assert_eq!(view.state, State::Running);
+        assert_eq!(view.message.as_deref(), Some("cancelling"));
+    }
+
+    #[test]
+    fn a_cancelled_run_leaves_the_output_pane_as_cleared_on_spawn() {
+        let (mut view, _) = rewrite_view(
+            Focus::Source,
+            vec![Vec::new()],
+            Some(crate::process::Outcome::Cancelled),
+        );
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        view.tick();
+
+        // Spec §7: nothing to reconcile, because the pane was cleared on spawn and a cancelled
+        // run produced no final text.
+        assert_eq!(view.stream.output_text(), "");
+        assert!(
+            view.stream.debug_text().contains("cancelled"),
+            "the cancellation was not reported: {}",
+            view.stream.debug_text()
+        );
+        assert_ne!(view.state, State::Running, "the state stayed running");
+    }
+
+    #[test]
+    fn ctrl_c_when_idle_quits_with_no_prompt() {
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+        assert_eq!(view.state, State::Idle);
+
+        assert_eq!(
+            view.handle_key(&ctrl_char('c')),
+            Outcome::Quit,
+            "Ctrl+C did not quit while idle"
+        );
+    }
+
+    #[test]
+    fn ctrl_q_while_running_asks_first_and_the_second_press_quits() {
+        let (mut view, _) = rewrite_view(Focus::Source, vec![Vec::new()], None);
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        assert_eq!(
+            view.handle_key(&ctrl_char('q')),
+            Outcome::Continue,
+            "Ctrl+Q quit on the first press mid-run"
+        );
+        assert!(view.quit_armed, "the quit was not armed");
+        assert!(
+            view.message
+                .as_deref()
+                .is_some_and(|m| m.contains("Ctrl+Q")),
+            "the prompt is not actionable: {:?}",
+            view.message
+        );
+
+        // Declining must leave the run untouched, so the second press is the only way out.
+        assert!(!view.stream.debug_text().contains("cancelled"));
+
+        assert_eq!(
+            view.handle_key(&ctrl_char('q')),
+            Outcome::Quit,
+            "the confirming press did not quit"
+        );
+    }
+
+    #[test]
+    fn declining_the_confirmation_leaves_the_run_streaming() {
+        let (mut view, _) = rewrite_view(
+            Focus::Source,
+            vec![vec![delimited("still going")], Vec::new()],
+            None,
+        );
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        // Ask, then press something else instead of confirming.
+        view.handle_key(&ctrl_char('q'));
+        view.handle_key(&press_char('x'));
+
+        // The run continues: a tick still delivers its lines and the state is untouched.
+        assert!(
+            view.tick(),
+            "the run stopped delivering after a declined quit"
+        );
+        assert_eq!(view.state, State::Running, "the run was disturbed");
+        // The result event is labelled junk by design (its text belongs to the output pane),
+        // so "still streaming" is proved by the line arriving at all.
+        assert!(
+            view.stream.debug_text().contains("still going"),
+            "streaming stopped after a declined quit: {}",
+            view.stream.debug_text()
+        );
+    }
+
+    #[test]
+    fn ctrl_q_when_idle_quits_immediately_with_no_prompt() {
+        let (mut view, _) = rewrite_view(Focus::Source, Vec::new(), None);
+
+        assert_eq!(view.handle_key(&ctrl_char('q')), Outcome::Quit);
+        assert!(!view.quit_armed, "a prompt was armed while idle");
+    }
+
+    #[test]
+    fn a_non_json_line_mid_stream_is_junk_and_the_run_continues() {
+        let (mut view, _) = rewrite_view(
+            Focus::Source,
+            vec![
+                vec!["this is not JSON".to_owned()],
+                vec![delimited("the rewrite")],
+            ],
+            Some(exited(0)),
+        );
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+
+        // First tick: the garbage line only.
+        view.tick();
+        let debug = view.stream.debug_text();
+        assert!(
+            debug.contains("junk  this is not JSON"),
+            "a malformed line was not labelled junk: {debug}"
+        );
+        assert_eq!(view.state, State::Running, "a junk line aborted the run");
+
+        // Second tick: the run still finishes normally.
+        view.tick();
+        assert_eq!(view.state, State::Idle, "the run did not finish");
+        assert_eq!(view.stream.output_text(), "the rewrite");
+    }
+
+    #[test]
+    fn the_debug_ring_buffer_trims_and_still_tails() {
+        let (mut view, _) = rewrite_view(
+            Focus::Source,
+            vec![
+                (0..crate::panes::DEBUG_CAPACITY + 500)
+                    .map(|n| format!(r#"{{"type":"rate_limit_event","n":{n}}}"#))
+                    .collect(),
+            ],
+            None,
+        );
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+
+        view.tick();
+
+        let debug = view.stream.debug_text();
+        assert_eq!(
+            debug.lines().count(),
+            crate::panes::DEBUG_CAPACITY,
+            "the ring buffer did not trim to its capacity"
+        );
+        // Still tailing, so the newest line is on screen.
+        assert_eq!(
+            view.stream.debug_suffix(),
+            None,
+            "trimming stopped the pane from tailing"
+        );
+        let buffer = draw_at(&mut view, 80, 24);
+        let panes = layout::panes(Rect::new(0, 0, 80, 24));
+        let last_visible = row(&buffer, panes.debug.y + panes.debug.height - 2);
+        assert!(
+            last_visible.contains(&format!("n\":{}", crate::panes::DEBUG_CAPACITY + 499)),
+            "the newest line is not in view after trimming: {last_visible:?}"
+        );
+    }
+
+    #[test]
+    fn a_resize_during_a_run_does_not_panic_and_keeps_the_tail() {
+        let (mut view, _) = rewrite_view(
+            Focus::Source,
+            vec![
+                (0..40)
+                    .map(|n| format!(r#"{{"type":"rate_limit_event","n":{n}}}"#))
+                    .collect(),
+            ],
+            None,
+        );
+        let task = crate::harness::Task {
+            instructions: "formal",
+            source_text: "text",
+            model: None,
+            session: None,
+        };
+        view.machine
+            .as_mut()
+            .unwrap()
+            .start(&task, true, &mut view.stream, std::time::Instant::now())
+            .unwrap();
+        view.state = State::Running;
+        view.tick();
+
+        for (width, height) in [(80, 24), (40, 10), (10, 4), (1, 1), (120, 40), (80, 24)] {
+            let _ = draw_at(&mut view, width, height);
+        }
+
+        // Still tailing after every rewrap, so the newest line is on screen.
+        assert_eq!(
+            view.stream.debug_suffix(),
+            None,
+            "a resize stopped the pane from tailing"
+        );
+        assert_eq!(view.state, State::Running, "a resize disturbed the state");
     }
 
     #[test]
