@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: [harness-trait]
 attachments: []
 created: 2026-11-07T15:33:47Z
-updated: 2026-11-07T23:39:31Z
+updated: 2026-11-08T00:50:40Z
+closed-at: 2026-11-08T00:50:40Z
 ---
 # Process spawn and stream readers
 
