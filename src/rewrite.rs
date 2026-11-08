@@ -290,7 +290,8 @@ impl Machine {
             }
         };
 
-        // Remember the id the adapter generated, so every later call continues the session.
+        // Remember the id: from the argv when the adapter named the session, otherwise from
+        // the stream, on the first line that announces one (spec §6.5).
         if self.session.is_none() {
             self.session = session_from(&invocation);
         }
@@ -313,6 +314,21 @@ impl Machine {
         // polled first would still be safe, but this order makes "nothing is lost" obvious.
         let lines = child.drain();
         if !lines.is_empty() {
+            // A harness that names its own sessions announces the id on its stream rather than
+            // in the argv, so this is where a session first becomes known for it. Only while
+            // the id is unknown: a later announcement can only belong to a run the app did not
+            // start, and adopting it would silently continue the wrong thread (spec §7).
+            if self.session.is_none() {
+                for line in lines
+                    .iter()
+                    .filter(|line| line.stream == process::Stream::Stdout)
+                {
+                    if let Some(id) = self.adapter.session_from_event(&line.text) {
+                        self.session = Some(id);
+                        break;
+                    }
+                }
+            }
             stream.ingest(&lines, self.adapter.as_ref());
         }
 
@@ -348,6 +364,9 @@ impl Machine {
 /// The adapter generates the id and reports it through the argv rather than caching it, which
 /// keeps `build` pure (spec §6.2). So this is where the caller learns it: after `--session-id`
 /// for a first call, after `--resume` for a continuation.
+///
+/// `None` for a harness that names its own threads: its id is not in the argv at all, and
+/// [`Machine`] learns it from the event stream instead (spec §6.5).
 fn session_from(invocation: &Invocation) -> Option<String> {
     let at = invocation
         .args
@@ -361,6 +380,7 @@ mod tests {
     use super::*;
     use crate::harness::Task;
     use crate::harness::claude::Claude;
+    use crate::harness::{BuildError, Event};
     use crate::process::Stream as Origin;
 
     /// A child that replays a scripted sequence of drains and outcomes.
@@ -963,6 +983,240 @@ mod tests {
                 .is_some_and(|arg| arg.starts_with("INSTRUCTIONS:")),
             "an .exe carries the prompt as its last argument: {exe_args:?}"
         );
+    }
+
+    /// The session values an adapter was handed, one per `build`, shared with the test.
+    type SeenSessions = std::rc::Rc<std::cell::RefCell<Vec<Option<String>>>>;
+
+    /// An adapter that names its own sessions, the way codex does (spec §6.5).
+    ///
+    /// Deliberately not a real harness: the point under test is the machine's behaviour when
+    /// the id is unavailable in the argv, so the fake leaves that as the only variable. It
+    /// records the `session` it was handed, which is how a continuation is asserted.
+    struct SelfNaming {
+        seen_sessions: SeenSessions,
+    }
+
+    impl SelfNaming {
+        fn new() -> (Self, SeenSessions) {
+            let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            (
+                Self {
+                    seen_sessions: seen.clone(),
+                },
+                seen,
+            )
+        }
+    }
+
+    impl HarnessAdapter for SelfNaming {
+        fn name(&self) -> &str {
+            "self-naming"
+        }
+
+        /// The whole reason this fake exists: no id can be chosen on the command line.
+        fn new_session_id(&self) -> Option<String> {
+            None
+        }
+
+        fn build(&self, task: &Task<'_>) -> Result<Invocation, BuildError> {
+            self.seen_sessions
+                .borrow_mut()
+                .push(task.session.map(str::to_owned));
+            Ok(Invocation {
+                program: "self-naming".to_owned(),
+                // No session flag anywhere, so `session_from` finds nothing to read.
+                args: vec!["--json".to_owned()],
+                stdin: Some("prompt".to_owned()),
+            })
+        }
+
+        fn classify(&self, _line: &str) -> Event {
+            Event::Junk
+        }
+
+        fn final_text(&self, _line: &str) -> Option<String> {
+            None
+        }
+
+        /// Only an announcement carries an id. A substring scan is enough for a fake and keeps
+        /// this test free of the adapter's JSON parser.
+        fn session_from_event(&self, line: &str) -> Option<String> {
+            if !line.contains("\"thread.started\"") {
+                return None;
+            }
+            let key = "\"thread_id\":\"";
+            let rest = &line[line.find(key)? + key.len()..];
+            Some(rest[..rest.find('"')?].to_owned())
+        }
+    }
+
+    /// A machine whose adapter names its own sessions, with scripted children.
+    fn self_naming_machine(
+        lines: Vec<Vec<String>>,
+        outcome: Option<Outcome>,
+    ) -> (Machine, std::rc::Rc<std::cell::RefCell<Fake>>, SeenSessions) {
+        let (adapter, seen) = SelfNaming::new();
+        let shared = std::rc::Rc::new(std::cell::RefCell::new(Fake::new(lines, outcome)));
+        let handed = shared.clone();
+        let machine = Machine::with_spawner(
+            Box::new(adapter),
+            Box::new(move |_, _| {
+                Ok(Box::new(Scripted {
+                    inner: handed.clone(),
+                }) as Box<dyn Child>)
+            }),
+        );
+        (machine, shared, seen)
+    }
+
+    /// The announcement line codex emits, spelled as it appears on stdout.
+    fn thread_started(id: &str) -> String {
+        format!(r#"{{"type":"thread.started","thread_id":"{id}"}}"#)
+    }
+
+    #[test]
+    fn a_session_the_harness_names_is_learned_from_its_stream() {
+        // Spec §6.5: codex generates its own thread id and reports it on stdout, so there is
+        // nothing in the argv to read. Without this the status line would show `—` forever and
+        // the second rewrite could not continue the thread at all.
+        let id = "01a1bc23-1144-7de2-9a09-7a777c4a420c";
+        let (mut machine, _, _) =
+            self_naming_machine(vec![vec![thread_started(id)]], Some(exited(0)));
+        let mut stream = stream();
+
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+        // Nothing is known until a line arrives, because the argv carried no id.
+        assert_eq!(machine.session(), None, "the id came from somewhere else");
+
+        machine.tick(&mut stream);
+
+        assert_eq!(
+            machine.session(),
+            Some(id),
+            "the announced id was not adopted"
+        );
+    }
+
+    #[test]
+    fn the_learned_id_is_handed_to_the_next_rewrite() {
+        // The point of learning the id: a continuation must name the same thread. Asserted on
+        // what the adapter was given, because that is what actually reaches the argv.
+        let id = "01a1bc23-1144-7de2-9a09-7a777c4a420c";
+        let (mut machine, fake, seen) =
+            self_naming_machine(vec![vec![thread_started(id)]], Some(exited(0)));
+        let mut stream = stream();
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+        machine.tick(&mut stream);
+        assert_eq!(machine.session(), Some(id));
+
+        // A second run, with a child that stays live so `start` is not refused.
+        fake.borrow_mut().outcome = None;
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+
+        let seen = seen.borrow();
+        assert_eq!(
+            seen.first().and_then(Clone::clone),
+            None,
+            "the first call must not name a session it has not learned yet"
+        );
+        assert_eq!(
+            seen.get(1).cloned().flatten().as_deref(),
+            Some(id),
+            "the continuation did not carry the learned id"
+        );
+    }
+
+    #[test]
+    fn a_later_announcement_does_not_replace_a_known_id() {
+        // Only consulted while the id is unknown: a second announcement can only belong to a
+        // run this app did not start, and adopting it would silently continue the wrong thread.
+        let first = "01a1bc23-1144-7de2-9a09-7a777c4a420c";
+        let second = "01a1bc99-9999-4999-8999-999999999999";
+        let (mut machine, _, _) = self_naming_machine(
+            vec![vec![thread_started(first)], vec![thread_started(second)]],
+            Some(exited(0)),
+        );
+        let mut stream = stream();
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+
+        machine.tick(&mut stream);
+        assert_eq!(machine.session(), Some(first));
+        machine.tick(&mut stream);
+
+        assert_eq!(
+            machine.session(),
+            Some(first),
+            "a second announcement overwrote the id"
+        );
+    }
+
+    #[test]
+    fn ctrl_n_makes_the_next_run_adopt_the_new_streams_id() {
+        // Spec §5 step 3 for a self-naming harness: after a reset the next run is a new
+        // thread, so the id must come from the *new* stream. Keeping the old one would make
+        // the reset look effective while every rewrite piled into the same thread.
+        let first = "01a1bc23-1144-7de2-9a09-7a777c4a420c";
+        let second = "01a1bc99-9999-4999-8999-999999999999";
+        let (mut machine, fake, _) =
+            self_naming_machine(vec![vec![thread_started(first)]], Some(exited(0)));
+        let mut stream = stream();
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+        machine.tick(&mut stream);
+        assert_eq!(machine.session(), Some(first));
+
+        machine.reset_session().expect("idle between runs");
+
+        // The replacement child announces a different thread and stays live.
+        fake.borrow_mut().lines = vec![vec![thread_started(second)]];
+        fake.borrow_mut().outcome = None;
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+        assert_eq!(machine.session(), None, "the reset id survived the reset");
+
+        machine.tick(&mut stream);
+
+        assert_eq!(
+            machine.session(),
+            Some(second),
+            "the run after Ctrl+N kept the old thread id"
+        );
+    }
+
+    #[test]
+    fn a_client_named_session_survives_a_stream_that_names_another() {
+        // claude and pi write the id into the argv, so their stream must never be allowed to
+        // overwrite it mid-run: the two paths answer the same question and the argv wins.
+        let (mut machine, fake) = machine_with(Fake::new(
+            vec![vec![
+                r#"{"type":"system","subtype":"init","session_id":"SOMEONE-ELSE"}"#.to_owned(),
+            ]],
+            Some(exited(0)),
+        ));
+        let mut stream = stream();
+        machine
+            .start(&task("formal", "text"), true, &mut stream, Instant::now())
+            .unwrap();
+        let named = machine
+            .session()
+            .map(str::to_owned)
+            .expect("claude names one");
+
+        machine.tick(&mut stream);
+        fake.borrow_mut().lines.clear();
+
+        assert_eq!(machine.session().map(str::to_owned), Some(named));
     }
 
     #[test]

@@ -29,8 +29,8 @@ impl HarnessAdapter for Claude {
         "claude"
     }
 
-    fn new_session_id(&self) -> String {
-        new_uuid_v4()
+    fn new_session_id(&self) -> Option<String> {
+        Some(new_uuid_v4())
     }
 
     /// Builds the argv from spec §6.2, differing between first call and continuation only
@@ -974,7 +974,11 @@ mod tests {
 
     #[test]
     fn new_session_id_is_a_canonical_lowercase_uuid_v4() {
-        let id = harness().new_session_id();
+        // `Some`, because claude accepts an id the client chose (spec §6.2). The `Option`
+        // exists for harnesses that name their own sessions (§6.5), and claude is not one.
+        let id = harness()
+            .new_session_id()
+            .expect("claude names sessions on request");
 
         assert_uuid_v4(&id);
         assert_eq!(id, id.to_lowercase(), "not lowercase: {id}");
@@ -985,11 +989,28 @@ mod tests {
         // Uniqueness, not cryptographic quality: claude only parses the shape, but a
         // repeated id would silently continue a session that is not this one.
         let harness = harness();
-        let first = harness.new_session_id();
-        let second = harness.new_session_id();
+        let first = harness.new_session_id().expect("named");
+        let second = harness.new_session_id().expect("named");
 
         assert_ne!(first, second);
         assert_uuid_v4(&second);
+    }
+
+    #[test]
+    fn a_client_named_harness_announces_no_session_on_its_stream() {
+        // The default `session_from_event`: claude chose the id and wrote it into the argv,
+        // so there is nothing on stdout to learn. A non-`None` answer here would let the
+        // machine overwrite an id it already knows.
+        use crate::harness::HarnessAdapter;
+
+        for line in [
+            r#"{"type":"system","subtype":"init","session_id":"11111111-2222-4333-8444-555555555555"}"#,
+            r#"{"type":"result","result":"x"}"#,
+            "not json",
+            "",
+        ] {
+            assert_eq!(HarnessAdapter::session_from_event(&harness(), line), None);
+        }
     }
 
     #[test]

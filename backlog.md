@@ -1,5 +1,5 @@
 ## Active
-- [ ] Harness trait: a session id may come from the harness's own event stream #r26q4 <- [v2ffc]
+- [>] Harness trait: a session id may come from the harness's own event stream #r26q4 <- [v2ffc]
 - [ ] codex adapter: exec/exec resume argv, agent_message terminal text, thread id from the stream #x3dtv2 <- [r26q4, v2ffc]
 - [ ] Wire --harness codex through the CLI, the adapter factory, and the startup lookup #k6rqhh <- [r26q4]
 - [ ] Live verify: codex end to end, session carried across rewrites, sandbox holds in-app #khtxa <- [k6rqhh, x3dtv2]

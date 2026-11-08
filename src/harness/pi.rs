@@ -37,8 +37,8 @@ impl HarnessAdapter for Pi {
     /// digit, so the prefix supplies the leading letter and the uuid's last hex digit is the
     /// trailing one. No trailing hyphen, which is why the prefix is joined with `-` rather
     /// than appended (spec §6.3).
-    fn new_session_id(&self) -> String {
-        format!("psc-{}", super::claude::new_uuid_v4())
+    fn new_session_id(&self) -> Option<String> {
+        Some(format!("psc-{}", super::claude::new_uuid_v4()))
     }
 
     /// Builds the argv from spec §6.3.
@@ -50,9 +50,10 @@ impl HarnessAdapter for Pi {
     fn build(&self, task: &Task<'_>) -> Result<Invocation, BuildError> {
         // A first call has no id yet, so one is generated and reported through the argv, which
         // is where the caller reads it back (spec §6.3).
-        let session = task
-            .session
-            .map_or_else(|| self.new_session_id(), str::to_owned);
+        let session = task.session.map_or_else(
+            || self.new_session_id().expect("pi names its own sessions"),
+            str::to_owned,
+        );
 
         let mut args = Vec::with_capacity(18);
         // `--print` is pi's one-shot form; the app depends on pi neither opening a window nor
@@ -505,7 +506,11 @@ mod tests {
 
     #[test]
     fn a_session_id_is_a_psc_prefixed_uuid_in_pis_alphabet() {
-        let id = harness().new_session_id();
+        // `Some`, because pi opens the session named on the command line rather than minting
+        // one itself (spec §6.3).
+        let id = harness()
+            .new_session_id()
+            .expect("pi names sessions on request");
 
         assert!(id.starts_with("psc-"), "no psc- prefix: {id}");
         // pi's rule: `[A-Za-z0-9._-]`, starting and ending with a letter or digit.
@@ -537,7 +542,19 @@ mod tests {
     #[test]
     fn consecutive_session_ids_differ() {
         let harness = harness();
-        assert_ne!(harness.new_session_id(), harness.new_session_id());
+        assert_ne!(
+            harness.new_session_id().expect("named"),
+            harness.new_session_id().expect("named")
+        );
+    }
+
+    #[test]
+    fn a_client_named_harness_announces_no_session_on_its_stream() {
+        // pi's own id is in the argv, so its stream has nothing to teach the machine.
+        assert_eq!(
+            HarnessAdapter::session_from_event(&harness(), r#"{"type":"session","id":"psc-x"}"#),
+            None
+        );
     }
 
     #[test]

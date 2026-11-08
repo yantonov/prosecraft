@@ -105,11 +105,28 @@ pub trait HarnessAdapter {
     /// The binary name, which is also the name users know (`claude`, `pi`).
     fn name(&self) -> &str;
 
-    /// A fresh session id in the form this harness accepts.
+    /// A fresh session id in the form this harness accepts, or `None` when the harness
+    /// names its own sessions.
     ///
-    /// The one method that needs randomness, and the reason it is on the trait: claude
-    /// takes a UUID v4 and pi takes its own restricted alphabet (spec §6.2, §6.3).
-    fn new_session_id(&self) -> String;
+    /// `Some` is the client-named case, and the one that needs randomness: claude takes a
+    /// UUID v4 and pi takes its own restricted alphabet (spec §6.2, §6.3).
+    ///
+    /// `None` is not "no session" — it means the id cannot be chosen here at all, and will
+    /// be reported by the harness on its event stream instead, for
+    /// [`HarnessAdapter::session_from_event`] to pick up (spec §6.5). Returning `Some` for a
+    /// harness that ignores the value would put a made-up id in the status line while the
+    /// real thread ran under another name.
+    fn new_session_id(&self) -> Option<String>;
+
+    /// The session id, if this line was the one that announced it.
+    ///
+    /// Defaults to `None`, which is right for every client-named harness: it has nothing to
+    /// announce, because it chose the id itself and wrote it into the argv. A harness that
+    /// names its own threads answers here, and the app asks only while it has no id yet
+    /// (spec §7).
+    fn session_from_event(&self, _line: &str) -> Option<String> {
+        None
+    }
 
     /// Builds the argv for one call.
     ///
