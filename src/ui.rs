@@ -11,7 +11,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use crate::cli::Config;
 use crate::clipboard::Clipboard;
@@ -84,6 +84,9 @@ pub struct View<'a> {
     /// read-only paste refusal, which is the only thing that needs to interrupt without
     /// changing the status line.
     pub toast: Option<String>,
+    /// Whether the key-bindings panel is open (spec §4). A bool, not an enum: there is exactly
+    /// one panel, and a second overlay type would be speculative.
+    pub help: bool,
     /// Whether a quit is waiting for its second `Ctrl+Q` (spec §4: confirm while running).
     pub quit_armed: bool,
     /// The rewrite state machine (spec §5). Owned by the view so a key press and a tick are the
@@ -131,6 +134,7 @@ impl<'a> View<'a> {
             stream: StreamState::new(),
             clipboard: Box::new(crate::clipboard::Disabled),
             toast: None,
+            help: false,
             quit_armed: false,
             machine: None,
             session: config.session_id.clone(),
@@ -160,6 +164,20 @@ impl<'a> View<'a> {
         }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             return self.interrupt();
+        }
+        // Spec §4: `F1` toggles the key-bindings panel. Checked before the toast arm so the
+        // panel can be opened while a toast is showing, and before focus routing so it is one
+        // key from every pane.
+        if key.code == KeyCode::F(1) {
+            self.help = !self.help;
+            return Outcome::Continue;
+        }
+        // Spec §4: any key closes the panel, and the key that closes it does nothing else —
+        // the same "the dismissal eats the key" rule the toast uses below. Esc is in here
+        // rather than in `route_focus` for the same reason.
+        if self.help {
+            self.help = false;
+            return Outcome::Continue;
         }
         // A toast is the first thing any key dismisses, and it must not also do its own
         // action: pressing `y` to get rid of "this pane is read-only" should not then start
@@ -532,6 +550,13 @@ pub fn render(frame: &mut Frame, view: &mut View) {
     if let Some(toast) = &view.toast {
         draw_toast(frame, toast, panes.inner(view.focus));
     }
+    // The panel replaces the toast rather than stacking on it: two overlays on one frame would
+    // be unreadable, and the panel is the bigger of the two. It also holds the terminal cursor
+    // for the length of the frame, which `draw_pane` arranges by not placing one while
+    // `view.help` is set — otherwise a cursor would blink over the panel text.
+    if view.help {
+        draw_help(frame, frame.area());
+    }
     if panes.status.height > 0 {
         draw_status(frame, view, panes.status);
     }
@@ -557,8 +582,87 @@ fn draw_toast(frame: &mut Frame, text: &str, area: Rect) {
         .set_stringn(x, y, &text, usize::from(area.width), style);
 }
 
+/// The key bindings, as the panel lists them (spec §4). Order and wording follow the spec's
+/// table, because this list is that table's only on-screen copy: a binding that is added there
+/// and forgotten here would be invisible to the user. The arrows are the spec's own glyphs, and
+/// they are also the widest cell in the column.
+const HELP_ROWS: [(&str, &str); 13] = [
+    ("Ctrl+R", "rewrite, or resend into the same session"),
+    (
+        "Ctrl+N",
+        "new session: drop context, clear output and debug",
+    ),
+    ("Ctrl+C", "cancel the run, or quit when idle"),
+    ("Ctrl+Q", "quit; confirm while a rewrite is running"),
+    ("Tab / Shift+Tab", "cycle focus"),
+    ("Ctrl+← / →", "switch column"),
+    ("Ctrl+↑ / ↓", "switch row; no wrap"),
+    ("Ctrl+Y", "copy the focused pane"),
+    ("Ctrl+V", "paste into an editable pane"),
+    ("Ctrl+E", "load the clipboard into source"),
+    ("arrows", "move the cursor, or scroll"),
+    ("PgUp / PgDn", "scroll by a page"),
+    ("F1 / any key", "close this panel"),
+];
+
+/// Draws the key-bindings panel over the whole frame (spec §4).
+///
+/// A `Clear` first, unlike the toast: the toast sits inside one pane and can only overdraw
+/// text, while this panel spans borders, so without the clear the pane borders would run
+/// through it. Sized to the content and clamped to the frame, so a narrow terminal gets a
+/// clipped panel rather than a panic.
+fn draw_help(frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    // The widest row decides the panel, so the description column never wraps mid-sentence.
+    let key_width = HELP_ROWS
+        .iter()
+        .map(|(key, _)| display_width(key))
+        .max()
+        .unwrap_or(0);
+    let widest = HELP_ROWS
+        .iter()
+        .map(|(_, text)| key_width + 2 + display_width(text))
+        .max()
+        .unwrap_or(0);
+    // A leading space, the key column, two spaces, the description, a trailing space.
+    let width = (widest as u16 + 4).min(area.width);
+    // Border rows plus one row per binding.
+    let height = (HELP_ROWS.len() as u16 + 2).min(area.height);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let panel = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, panel);
+    let block = Block::bordered()
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(Color::Yellow))
+        .title(" key bindings — any key closes ");
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let rows: Vec<Line> = HELP_ROWS
+        .iter()
+        .take(usize::from(inner.height))
+        .map(|(key, text)| {
+            // The description absorbs whatever is left, so a clipped panel loses the end of a
+            // sentence rather than the key that leads it.
+            let key_cell = format!("{key:<key_width$}");
+            let room = usize::from(inner.width).saturating_sub(key_width + 3);
+            Line::from(format!(" {key_cell}  {}", fit(text, room as u16)))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
 fn draw_pane(frame: &mut Frame, view: &mut View, panes: &layout::Panes, focus: Focus, area: Rect) {
     let focused = focus == view.focus;
+    // Read before `view.editable` borrows the whole view mutably: the panel takes the cursor, so
+    // no `set_cursor_position` may be issued while it is open.
+    let help = view.help;
     // The debug pane says so when it has stopped following the stream, so a scrolled pane
     // cannot look frozen (spec §6.1b). The output pane has nothing to follow and never says
     // it.
@@ -587,8 +691,9 @@ fn draw_pane(frame: &mut Frame, view: &mut View, panes: &layout::Panes, focus: F
         // pane shows a cursor, which is why the unfocused one is drawn without setting it.
         Some((editor, wrap)) => {
             // Only the focused pane owns the cursor: the last `set_cursor_position` of a draw
-            // wins, so an unfocused pane placing one would steal it.
-            if focused {
+            // wins, so an unfocused pane placing one would steal it. The panel takes it too,
+            // or it would blink over the panel text.
+            if focused && !help {
                 wrap.render(frame, editor, panes.inner(focus));
             } else {
                 wrap.render_unfocused(frame, editor, panes.inner(focus));
@@ -637,7 +742,7 @@ fn draw_status(frame: &mut Frame, view: &View, area: Rect) {
         line.push_str(" │ ");
         line.push_str(message);
     }
-    line.push_str(" │ [Ctrl+R] rewrite  [Tab] focus  [Ctrl+Q] quit");
+    line.push_str(" │ [Ctrl+R] rewrite  [Tab] focus  [F1] help  [Ctrl+Q] quit");
     // No `Wrap`: the line is already guaranteed to fit, and leaving wrapping off makes
     // "never wraps" a property of the code rather than of the widget's defaults.
     frame.render_widget(Paragraph::new(Line::from(fit(&line, area.width))), area);
@@ -770,6 +875,10 @@ mod tests {
     /// Mirrors `draw_pane`: only the focused editable pane goes through `WrapState::render`,
     /// which is the only place that calls `set_cursor_position`.
     fn cursor_from_view(view: &View, width: u16, height: u16) -> Option<(u16, u16)> {
+        // Mirrors `draw_pane`: the panel takes the cursor, so nothing is placed while it is open.
+        if view.help {
+            return None;
+        }
         let (editor, wrap) = match view.focus {
             Focus::Source => (&view.source, &view.source_wrap),
             Focus::Instructions => (&view.instructions, &view.instructions_wrap),
@@ -1022,6 +1131,22 @@ mod tests {
         assert_eq!(
             cursor_of(&mut View::new(&config(), Focus::Output), 80, 24),
             None
+        );
+    }
+
+    #[test]
+    fn the_panel_takes_the_cursor_so_it_does_not_blink_over_the_text() {
+        let mut view = editing_view(Focus::Source, "source text");
+        // Sanity: without the panel the focused pane owns the cursor.
+        assert!(cursor_of(&mut view, 80, 24).is_some());
+
+        view.handle_key(&f1());
+        // `cursor_of` also asserts the draw agrees with the prediction, so this pins that no
+        // `set_cursor_position` was issued at all.
+        assert_eq!(
+            cursor_of(&mut view, 80, 24),
+            None,
+            "the cursor was placed while the panel was open"
         );
     }
 
@@ -2065,6 +2190,131 @@ mod tests {
         );
         // A toast is an overlay, not a new layout: the status line keeps its row.
         assert!(row(&buffer, panes.status.y).contains("claude"));
+    }
+
+    fn f1() -> KeyEvent {
+        KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)
+    }
+
+    /// Every row of the panel, as one string, so a missing binding is a readable assertion.
+    fn panel_text(view: &mut View, width: u16, height: u16) -> String {
+        let buffer = draw_at(view, width, height);
+        (0..height)
+            .map(|y| row(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn f1_opens_the_panel_and_every_binding_is_visible_at_80x24() {
+        let mut view = editing_view(Focus::Source, "");
+        view.handle_key(&f1());
+        assert!(view.help, "F1 did not open the panel");
+
+        let rendered = panel_text(&mut view, 80, 24);
+        for (key, _) in HELP_ROWS {
+            assert!(
+                rendered.contains(key),
+                "binding {key:?} missing from the panel:\n{rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("any key closes"),
+            "the panel does not say how to get out:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn f1_twice_and_any_key_both_close_the_panel() {
+        let mut view = editing_view(Focus::Source, "");
+        view.handle_key(&f1());
+        view.handle_key(&f1());
+        assert!(!view.help, "a second F1 did not close the panel");
+
+        view.handle_key(&f1());
+        assert!(view.help);
+        view.handle_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!view.help, "Esc did not close the panel");
+
+        // Any key means any key, not just the two that are documented.
+        view.handle_key(&f1());
+        view.handle_key(&press_char('x'));
+        assert!(!view.help, "an ordinary key did not close the panel");
+    }
+
+    #[test]
+    fn the_key_that_closes_the_panel_does_nothing_else() {
+        // The same rule the toast follows: dismissing is not also an action. Otherwise a user
+        // who opens the panel and then types would find the first character missing — or, with
+        // focus in the source pane, silently inserted.
+        let mut view = editing_view(Focus::Source, "keep");
+        view.handle_key(&f1());
+        view.handle_key(&press_char('!'));
+
+        assert_eq!(
+            view.source.text(),
+            "keep",
+            "the closing key was also applied to the buffer"
+        );
+
+        // And it is not consumed for the *next* key either, or the panel would eat two keys.
+        view.handle_key(&press_char('!'));
+        assert_eq!(view.source.text(), "keep!");
+    }
+
+    #[test]
+    fn ctrl_q_still_quits_while_the_panel_is_open() {
+        let mut view = editing_view(Focus::Source, "");
+        view.handle_key(&f1());
+        assert_eq!(
+            view.handle_key(&ctrl(KeyCode::Char('q'))),
+            Outcome::Quit,
+            "the panel swallowed the quit key"
+        );
+    }
+
+    #[test]
+    fn the_panel_survives_a_tiny_frame_and_the_status_line_keeps_its_row() {
+        // Sized to the content but clamped to the frame: at these sizes the panel cannot fit,
+        // and the only acceptable outcome is a clipped panel, never a panic.
+        for (width, height) in [(1, 1), (10, 3), (20, 6), (40, 12)] {
+            let mut view = editing_view(Focus::Source, "source text");
+            view.handle_key(&f1());
+            let _ = draw_at(&mut view, width, height);
+        }
+
+        let mut view = editing_view(Focus::Source, "source text");
+        view.handle_key(&f1());
+        let buffer = draw_at(&mut view, 80, 24);
+        let panes = layout::panes(Rect::new(0, 0, 80, 24));
+        let status = row(&buffer, panes.status.y);
+        assert!(status.contains("claude"), "status line lost: {status:?}");
+        assert!(
+            status.contains("[F1] help"),
+            "the panel is undiscoverable: {status:?}"
+        );
+    }
+
+    #[test]
+    fn the_panel_covers_the_pane_borders_instead_of_letting_them_show_through() {
+        let mut view = editing_view(Focus::Source, "source text");
+        view.handle_key(&f1());
+
+        // The panel is centred; take its own border row and check that no pane border or title
+        // survives inside it. A missing `Clear` would leave `source`/`output` titles in place.
+        let rendered = panel_text(&mut view, 80, 24);
+        let title_row = rendered
+            .lines()
+            .find(|line| line.contains("key bindings"))
+            .unwrap_or_else(|| panic!("panel title not drawn:\n{rendered}"));
+        assert!(
+            !title_row.contains("source") && !title_row.contains("output"),
+            "a pane title shows through the panel border: {title_row:?}"
+        );
+        assert!(
+            title_row.contains('═'),
+            "panel has no border: {title_row:?}"
+        );
     }
 
     /// A clipboard that always fails, standing in for a machine with no display server.

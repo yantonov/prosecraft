@@ -32,3 +32,4 @@
 - [x] Pin LF line endings with .gitattributes #gitattributes <- [tui-dummy]
 - [x] Re-audit the dead_code allowances now the backlog is closed #dead-code-audit
 - [x] Investigate claude returning an empty result field #empty-result
+- [x] F1 help panel: key bindings overlay #oujuuu

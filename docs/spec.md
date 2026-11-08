@@ -101,7 +101,9 @@ Four panes, all focusable. Two columns, 50/50.
   minimum 3 lines, capped at 8. The same formula on equal-height columns puts their top
   border on one row, so the two halves of the frame line up.
 - Status line: harness name, session id (short form, `—` before the first rewrite), state
-  (`idle` / `running` / `error`), then the key hints.
+  (`idle` / `running` / `error`), then the key hints. The hints are `[Ctrl+R] rewrite`,
+  `[Tab] focus`, `[F1] help`, `[Ctrl+Q] quit` in that order; the rest of the key set is
+  reachable only from the help panel, because the row is one line that clips.
 
 ### Key bindings
 
@@ -119,7 +121,8 @@ Four panes, all focusable. Two columns, 50/50.
 | `Ctrl+E` | Load the clipboard into the source pane, replacing it |
 | arrow keys | Move cursor (editable) or scroll (read-only) |
 | `PgUp` / `PgDn` | Scroll by a page in the focused pane |
-| `Esc` | Does nothing in v0.1 |
+| `F1` | Toggle the key-bindings help panel. Any key closes it; the key that closes it does nothing else |
+| `Esc` | Closes the help panel when it is open. Otherwise does nothing in v0.1 |
 
 ## 5. Rewrite flow
 
