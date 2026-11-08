@@ -20,6 +20,7 @@
 //! then drive every transition — done, error, cancelled, timeout — without a process, and the
 //! production path is one thin implementation of three methods.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::harness::{HarnessAdapter, Invocation, Task};
@@ -112,6 +113,14 @@ pub struct Machine {
     /// `Ctrl+N` (spec §5 step 3). `None` means the next call opens a new session.
     session: Option<String>,
     adapter: Box<dyn HarnessAdapter>,
+    /// The program to start, exactly as the startup resolver returned it.
+    ///
+    /// The adapter names its harness (`pi`), which is the right *name* and the wrong
+    /// *program*: on Windows `Command::new("pi")` fails with "program not found" when the
+    /// installation is `pi.cmd` or a bare `pi.exe`, because `CreateProcess` appends only
+    /// `.exe`. Holding the resolved path here is what makes the startup check and the spawn
+    /// the same answer rather than two guesses (spec §3).
+    program: PathBuf,
     spawner: Spawner,
     /// Wall-clock limit for each run. A field rather than a constant so a test can pass
     /// hundreds of milliseconds instead of waiting out the 180 s default (spec §7).
@@ -124,17 +133,22 @@ impl std::fmt::Debug for Machine {
             .field("running", &self.child.is_some())
             .field("session", &self.session)
             .field("harness", &self.adapter.name())
+            .field("program", &self.program)
             .finish()
     }
 }
 
 impl Machine {
     /// A machine that spawns real processes through [`process::Run`].
-    pub fn new(adapter: Box<dyn HarnessAdapter>) -> Self {
+    ///
+    /// `program` is the resolver's answer from startup: the concrete file to start, not the
+    /// harness's name. Passing it in keeps this module free of any platform lookup rule.
+    pub fn new(adapter: Box<dyn HarnessAdapter>, program: PathBuf) -> Self {
         Self {
             child: None,
             session: None,
             adapter,
+            program,
             spawner: Box::new(|invocation, timeout| {
                 process::Run::spawn_with_timeout(invocation, timeout)
                     .map(|run| Box::new(run) as Box<dyn Child>)
@@ -160,12 +174,17 @@ impl Machine {
     }
 
     /// A machine that spawns whatever `spawner` returns, for tests.
+    ///
+    /// The program is the adapter's own name: no test here reaches the OS, so there is
+    /// nothing for a platform rule to decide.
     #[cfg(test)]
     pub fn with_spawner(adapter: Box<dyn HarnessAdapter>, spawner: Spawner) -> Self {
+        let program = PathBuf::from(adapter.name());
         Self {
             child: None,
             session: None,
             adapter,
+            program,
             spawner,
             timeout: DEFAULT_TIMEOUT,
         }
@@ -236,10 +255,15 @@ impl Machine {
             session: self.session.as_deref(),
             ..*task
         };
-        let invocation = self
+        let mut invocation = self
             .adapter
             .build(&built)
             .map_err(|_| Refusal::HarnessGone)?;
+        // The adapter supplies the harness *name*; the program that is actually started is the
+        // one the startup resolver chose. Overriding it here, at the single place an
+        // invocation becomes a process, is what makes "found at startup" and "runnable now"
+        // the same statement (spec §3).
+        invocation.program = self.program.to_string_lossy().into_owned();
 
         let child = match (self.spawner)(&invocation, self.timeout) {
             Ok(child) => child,
@@ -826,6 +850,38 @@ mod tests {
             "the spawn failure was not reported: {}",
             stream.debug_text()
         );
+    }
+
+    #[test]
+    fn the_spawned_program_is_the_resolved_path_not_the_harness_name() {
+        // The defect this pins down: the adapter names its harness (`claude`) and the spawn
+        // used that name. On Windows `Command::new("claude")` fails with "program not found"
+        // when the installation is `claude.exe`, so the startup check accepted a binary the
+        // spawn could not start. The machine now starts the resolver's answer instead.
+        let recorded = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let handed = recorded.clone();
+        let mut machine = Machine::new(Box::new(Claude), PathBuf::from("/opt/bin/claude.exe"));
+        machine.spawner = Box::new(move |invocation, _| {
+            handed.borrow_mut().push(invocation.program.clone());
+            Ok(Box::new(Scripted {
+                inner: std::rc::Rc::new(std::cell::RefCell::new(Fake::new(
+                    Vec::new(),
+                    Some(exited(0)),
+                ))),
+            }) as Box<dyn Child>)
+        });
+
+        machine
+            .start(&task("formal", "text"), true, &mut stream(), Instant::now())
+            .expect("the machine refused a valid task");
+
+        assert_eq!(
+            recorded.borrow().as_slice(),
+            ["/opt/bin/claude.exe".to_owned()],
+            "the adapter's bare name reached the spawner instead of the resolved path"
+        );
+        // And the argv is still the adapter's: only the program was overridden.
+        assert_eq!(Claude.name(), "claude");
     }
 
     #[test]

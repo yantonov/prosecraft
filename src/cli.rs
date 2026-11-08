@@ -8,7 +8,6 @@
 //! `--*-file` reads. A missing harness must never surface as a file error, and neither
 //! must happen after raw mode is entered.
 
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -16,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use clap::error::{ContextKind, ContextValue};
 use clap::{CommandFactory, Parser, ValueEnum};
+
+use crate::harness::resolve;
 
 /// The harness adapter selected on the command line. It cannot change at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -119,6 +120,9 @@ fn attach_usage(err: clap::Error) -> clap::Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub harness: Harness,
+    /// The program the harness resolved to at startup. Carried rather than looked up again so
+    /// the startup check and every later spawn are the same answer by construction (spec §3).
+    pub harness_program: PathBuf,
     pub model: Option<String>,
     /// `None` until the first rewrite creates a session (spec §5). The status line shows an
     /// em-dash while it is absent, which is why this is not defaulted to an empty string.
@@ -131,8 +135,10 @@ pub struct Config {
 /// are runtime failures of an otherwise valid invocation, so they exit 1.
 #[derive(Debug)]
 pub enum Error {
-    /// The harness program named by `--harness` is not on `PATH`.
-    HarnessMissing(Harness),
+    /// The harness program named by `--harness` could not be resolved to something runnable.
+    /// Carries the resolution so the message can say *which* way it failed: absent, or present
+    /// but a shim this build cannot drive.
+    HarnessMissing(Harness, resolve::Resolved),
     /// A `--text-file` / `--prompt-file` path could not be read as UTF-8 text.
     ReadFile {
         flag: &'static str,
@@ -153,12 +159,8 @@ impl fmt::Display for Error {
     /// multi-line report is harder to spot in a shell prompt's output.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HarnessMissing(harness) => {
-                write!(
-                    f,
-                    "harness binary `{}` not found on PATH",
-                    harness.binary_name()
-                )
+            Self::HarnessMissing(harness, reason) => {
+                write!(f, "harness binary `{}` {reason}", harness.binary_name())
             }
             Self::ReadFile { flag, path, source } => {
                 write!(f, "cannot read {flag} `{}`: {source}", path.display())
@@ -170,26 +172,31 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::HarnessMissing(_) => None,
+            Self::HarnessMissing(..) => None,
             Self::ReadFile { source, .. } => Some(source),
         }
     }
 }
 
-/// Resolves the harness binary and reads the startup files, in the order spec §3 requires.
+/// Resolves the harness program and reads the startup files, in the order spec §3 requires.
 ///
 /// `lookup` and `clipboard` are injected so this function has no hidden dependency on the
 /// machine: tests simulate a missing binary and count clipboard reads without spawning.
 pub fn assemble(
     args: Args,
-    lookup: impl Fn(&str) -> bool,
+    lookup: impl Fn(&str) -> resolve::Resolved,
     clipboard: &mut impl crate::clipboard::Clipboard,
 ) -> Result<Config, Error> {
     // Before the file reads: a missing harness is the more fundamental problem, and the
     // spec forbids opening the UI in that case, so its error must win.
-    if !lookup(args.harness.binary_name()) {
-        return Err(Error::HarnessMissing(args.harness));
-    }
+    //
+    // `program()` is the whole verdict: a resolution that cannot name a runnable program is a
+    // refusal, which is what keeps this check and the spawn from disagreeing.
+    let resolved = lookup(args.harness.binary_name());
+    let Some(harness_program) = resolved.program() else {
+        return Err(Error::HarnessMissing(args.harness, resolved));
+    };
+    let harness_program = harness_program.to_path_buf();
 
     // Read exactly once, here. `Config` holds the text, not the path, so nothing later
     // can re-read the file — there is no reload hotkey and no lazy source.
@@ -211,6 +218,7 @@ pub fn assemble(
 
     Ok(Config {
         harness: args.harness,
+        harness_program,
         model: args.model,
         // Created lazily on the first `Ctrl+R`; startup never starts a session.
         session_id: None,
@@ -227,69 +235,12 @@ fn read_text_file(flag: &'static str, path: &Path) -> Result<String, Error> {
     })
 }
 
-/// Production binary lookup: the same answer the shell would give for a bare name.
+/// Production binary lookup: the machine's own answer for a harness name.
 ///
-/// A name containing a separator is taken literally, matching how the harness is later
-/// spawned; only a bare name is searched on `PATH`.
-pub fn binary_on_path(binary: &str) -> bool {
-    lookup_in(std::env::var_os("PATH").as_deref(), binary)
-}
-
-/// The `PATH` search with the path value passed in, so the search is testable without
-/// mutating the process environment (which would race with parallel tests).
-fn lookup_in(path_var: Option<&std::ffi::OsStr>, binary: &str) -> bool {
-    let candidate = Path::new(binary);
-    // A name with a separator is already a path; searching `PATH` for it would be wrong.
-    if candidate.components().count() > 1 {
-        return is_executable_file(candidate);
-    }
-    let Some(path_var) = path_var else {
-        return false;
-    };
-    std::env::split_paths(path_var).any(|dir| {
-        executable_names(binary)
-            .iter()
-            .any(|name| is_executable_file(&dir.join(name)))
-    })
-}
-
-/// A directory is not a program, and on Unix the execute bit is what makes a file
-/// runnable, so a readable-but-not-executable file must not pass the startup check.
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-/// Windows finds an extensionless name through `PATHEXT`, so the check has to try the
-/// same names or a real `claude.exe` install would look missing.
-fn executable_names(binary: &str) -> Vec<OsString> {
-    #[cfg(windows)]
-    {
-        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
-        let mut names = Vec::with_capacity(5);
-        names.push(OsString::from(binary));
-        for ext in pathext.split(';').filter(|ext| !ext.is_empty()) {
-            names.push(OsString::from(format!("{binary}{ext}")));
-        }
-        names
-    }
-    #[cfg(not(windows))]
-    {
-        vec![OsString::from(binary)]
-    }
+/// Delegates to [`crate::harness::resolve`], which owns every platform rule. This wrapper
+/// exists only so the call reads as "the machine's `PATH`" at the startup site.
+pub fn resolve_harness(binary: &str) -> resolve::Resolved {
+    resolve::lookup(binary)
 }
 
 #[cfg(test)]
@@ -323,10 +274,6 @@ mod tests {
             Self(dir)
         }
 
-        fn root(&self) -> &Path {
-            &self.0
-        }
-
         fn path(&self, name: &str) -> PathBuf {
             self.0.join(name)
         }
@@ -358,17 +305,19 @@ mod tests {
     }
 
     /// A harness lookup that always succeeds, used where the binary is not under test.
-    fn found(_: &str) -> bool {
-        true
+    fn found(_: &str) -> resolve::Resolved {
+        resolve::Resolved::Program {
+            program: PathBuf::from("stub-harness"),
+        }
     }
 
-    fn not_found(_: &str) -> bool {
-        false
+    fn not_found(_: &str) -> resolve::Resolved {
+        resolve::Resolved::Missing
     }
 
     fn assemble_args(
         argv: &[&str],
-        lookup: impl Fn(&str) -> bool,
+        lookup: impl Fn(&str) -> resolve::Resolved,
     ) -> (Result<Config, Error>, usize) {
         let mut clipboard = crate::clipboard::Recording::with("clipboard text");
         let result = assemble(valid(argv), lookup, &mut clipboard);
@@ -459,7 +408,7 @@ mod tests {
             not_found,
         );
         match result.unwrap_err() {
-            Error::HarnessMissing(harness) => assert_eq!(harness, Harness::Claude),
+            Error::HarnessMissing(harness, _) => assert_eq!(harness, Harness::Claude),
             other => panic!("expected HarnessMissing, got {other:?}"),
         }
     }
@@ -473,7 +422,7 @@ mod tests {
             args,
             |binary| {
                 seen.set(Some(binary.to_owned()));
-                true
+                found(binary)
             },
             &mut clipboard,
         )
@@ -716,73 +665,79 @@ mod tests {
     }
 
     #[test]
-    fn binary_on_path_accepts_an_executable_file_given_by_path() {
-        let dir = TempDir::new("exec");
+    fn the_resolved_program_is_carried_into_the_config() {
+        // The defect this pins down: the check said "found" for a file the spawn could not
+        // run, because the two asked different questions. The config now carries the answer
+        // the spawn uses, so there is one verdict, not two.
+        let dir = TempDir::new("carried");
         let path = dir.write_binary("claude");
 
-        assert!(binary_on_path(path.to_str().unwrap()));
-    }
+        let config = assemble(
+            valid(&["prosecraft", "--harness", "claude"]),
+            |_| resolve::Resolved::Program {
+                program: path.clone(),
+            },
+            &mut crate::clipboard::Recording::default(),
+        )
+        .unwrap();
 
-    #[cfg(unix)]
-    #[test]
-    fn binary_on_path_rejects_a_file_without_the_execute_bit() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = TempDir::new("noexec");
-        let path = dir.write("claude", "");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-
-        assert!(!binary_on_path(path.to_str().unwrap()));
+        assert_eq!(config.harness_program, path);
     }
 
     #[test]
-    fn binary_on_path_rejects_a_path_that_does_not_exist() {
-        let dir = TempDir::new("absent");
-        let path = dir.path("claude");
+    fn a_resolution_without_a_program_refuses_startup() {
+        // Both non-spawnable answers take the same exit path, and the message says which.
+        for resolution in [
+            resolve::Resolved::Missing,
+            resolve::Resolved::ShimUnsupported,
+        ] {
+            let (result, reads) =
+                assemble_args(&["prosecraft", "--harness", "pi"], |_| resolution.clone());
 
-        assert!(!binary_on_path(path.to_str().unwrap()));
-    }
-
-    /// `PATH` is passed in rather than set, so this test cannot race the others.
-    fn path_var(dirs: &[&TempDir]) -> std::ffi::OsString {
-        std::env::join_paths(dirs.iter().map(|dir| dir.root())).expect("join PATH entries")
-    }
-
-    #[test]
-    fn lookup_finds_a_binary_in_a_later_path_entry() {
-        let empty = TempDir::new("shadowed");
-        let dir = TempDir::new("second-entry");
-        dir.write_binary("claude");
-
-        assert!(lookup_in(Some(&path_var(&[&empty, &dir])), "claude"));
-    }
-
-    #[test]
-    fn lookup_reports_not_found_when_no_entry_holds_the_binary() {
-        let first = TempDir::new("a");
-        let second = TempDir::new("b");
-
-        assert!(!lookup_in(Some(&path_var(&[&first, &second])), "claude"));
+            match result.unwrap_err() {
+                Error::HarnessMissing(harness, reason) => {
+                    assert_eq!(harness, Harness::Pi);
+                    assert_eq!(reason, resolution);
+                }
+                other => panic!("expected HarnessMissing, got {other:?}"),
+            }
+            // Refused before the clipboard was touched, exactly like a missing binary.
+            assert_eq!(reads, 0, "a refusal must not read the clipboard");
+        }
     }
 
     #[test]
-    fn lookup_without_a_path_variable_is_not_found() {
-        assert!(!lookup_in(None, "claude"));
+    fn a_batch_shim_is_reported_as_present_but_undrivable() {
+        // The message is what the user acts on: telling someone to install a harness they
+        // already have would send them the wrong way.
+        let err = Error::HarnessMissing(Harness::Pi, resolve::Resolved::ShimUnsupported);
+        let rendered = err.to_string();
+
+        assert!(
+            rendered.contains("`pi`"),
+            "the binary is not named: {rendered}"
+        );
+        assert!(
+            rendered.contains("batch shim"),
+            "the reason is not explained: {rendered}"
+        );
+        assert!(
+            !rendered.contains("not found on PATH"),
+            "a present harness must not be reported as absent: {rendered}"
+        );
+        assert_eq!(rendered.lines().count(), 1, "spec §3 asks for one line");
     }
 
     #[test]
-    fn lookup_does_not_match_a_different_binary_name() {
-        let dir = TempDir::new("wrong-name");
-        dir.write_binary("pi");
+    fn a_missing_harness_is_reported_as_not_found() {
+        let err = Error::HarnessMissing(Harness::Claude, resolve::Resolved::Missing);
+        let rendered = err.to_string();
 
-        assert!(!lookup_in(Some(&path_var(&[&dir])), "claude"));
-    }
-
-    #[test]
-    fn lookup_does_not_match_a_directory_named_like_the_binary() {
-        let dir = TempDir::new("dir-named");
-        fs::create_dir(dir.path("claude")).unwrap();
-
-        assert!(!lookup_in(Some(&path_var(&[&dir])), "claude"));
+        assert!(rendered.contains("`claude`"), "not named: {rendered}");
+        assert!(
+            rendered.contains("not found on PATH"),
+            "not explained: {rendered}"
+        );
+        assert_eq!(rendered.lines().count(), 1, "spec §3 asks for one line");
     }
 }

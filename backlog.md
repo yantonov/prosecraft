@@ -1,10 +1,12 @@
 ## Active
+- [ ] pi on Windows: deliver the prompt on stdin when the harness resolves to a batch shim #glrti <- [o4snh]
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
 - [x] Dummy empty TUI app #tui-dummy
 - [x] CLI args and startup validation #args-cli <- [tui-dummy]
 - [x] Keys are drawn only when a tick reports a change, so nothing typed shows #df6ic
+- [x] Resolve the harness program once, identically for the startup check and the spawn #o4snh
 - [x] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
 - [x] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
 - [x] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]

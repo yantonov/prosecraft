@@ -41,7 +41,7 @@ fn main() -> ExitCode {
     // so this opens no display connection unless the source text actually comes from it.
     let config = match cli::assemble(
         args,
-        cli::binary_on_path,
+        cli::resolve_harness,
         &mut crate::clipboard::System::new(),
     ) {
         Ok(config) => config,
@@ -109,7 +109,10 @@ impl Tui {
         // The real clipboard and the real harness adapter for the running app; tests build a
         // view with the recording clipboard and a scripted child instead.
         view.clipboard = Box::new(crate::clipboard::System::new());
-        view.machine = Some(Box::new(rewrite::Machine::new(adapter_for(config.harness))));
+        view.machine = Some(Box::new(rewrite::Machine::new(
+            adapter_for(config.harness),
+            config.harness_program.clone(),
+        )));
 
         // Ticking rather than blocking: a live rewrite delivers lines on the child's threads,
         // and nothing can arrive if the loop is parked in `event::read` until the next key
@@ -237,6 +240,7 @@ mod tests {
         // config to draw from, and a leak in a test binary costs nothing.
         let config = Box::leak(Box::new(Config {
             harness: cli::Harness::Claude,
+            harness_program: std::path::PathBuf::from("stub-harness"),
             model: None,
             session_id: None,
             initial_source: String::new(),

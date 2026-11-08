@@ -33,9 +33,19 @@ impl TempDir {
     }
 
     /// A directory that satisfies the harness lookup without a real harness in it.
+    /// A stand-in harness the startup check must accept.
+    ///
+    /// The name is platform-shaped on purpose: on Windows an extensionless file is not a
+    /// program (`CreateProcess` refuses it), so a fixture without `.exe` would test the
+    /// "missing" path instead of the one it claims to.
     fn with_placeholder_harness(tag: &str) -> Self {
         let dir = Self::new(tag);
-        let placeholder = dir.0.join("claude");
+        let name = if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        };
+        let placeholder = dir.0.join(name);
         fs::write(&placeholder, "not a real harness; never executed").expect("write placeholder");
         #[cfg(unix)]
         {

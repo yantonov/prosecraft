@@ -364,8 +364,11 @@ impl<'a> View<'a> {
             session: None,
         };
         // A binary that resolved at startup can disappear before a rewrite; §5 step 1 refuses
-        // it here too rather than spawning and failing.
-        let present = crate::cli::binary_on_path(self.config.harness.binary_name());
+        // it here too rather than spawning and failing. The lookup is the same one startup
+        // used, so "present" cannot mean something different from "spawnable".
+        let present = crate::cli::resolve_harness(self.config.harness.binary_name())
+            .program()
+            .is_some();
 
         let focus = self.focus;
         match machine.start(&task, present, &mut self.stream, std::time::Instant::now()) {
@@ -713,6 +716,7 @@ mod tests {
     fn config() -> Config {
         Config {
             harness: Harness::Claude,
+            harness_program: std::path::PathBuf::from("stub-harness"),
             model: None,
             session_id: None,
             initial_source: "source text".to_owned(),
@@ -1628,6 +1632,7 @@ mod tests {
     fn editing_view(focus: Focus, text: &str) -> View<'static> {
         let config = Box::leak(Box::new(Config {
             harness: Harness::Claude,
+            harness_program: std::path::PathBuf::from("stub-harness"),
             model: None,
             session_id: None,
             initial_source: text.to_owned(),
@@ -1826,6 +1831,7 @@ mod tests {
     ) -> (View<'static>, crate::clipboard::Recording) {
         let config = Box::leak(Box::new(Config {
             harness: Harness::Claude,
+            harness_program: std::path::PathBuf::from("stub-harness"),
             model: None,
             session_id: None,
             initial_source: String::new(),
@@ -2135,6 +2141,7 @@ mod tests {
 
         let config = Box::leak(Box::new(Config {
             harness: Harness::Claude,
+            harness_program: std::path::PathBuf::from("stub-harness"),
             model: None,
             session_id: None,
             initial_source: "source text".to_owned(),
@@ -2216,6 +2223,7 @@ mod tests {
         // the binary is stubbed by pointing the view at a name that is on PATH.
         view.config = Box::leak(Box::new(Config {
             harness: Harness::Claude,
+            harness_program: std::path::PathBuf::from("stub-harness"),
             model: None,
             session_id: None,
             initial_source: String::new(),
