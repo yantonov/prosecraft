@@ -1,4 +1,5 @@
 ## Active
+- [ ] Resolve where raw text goes when a marker is missing #spec-marker-fallback
 - [ ] Re-audit the dead_code allowances now the backlog is closed #dead-code-audit
 - [ ] Investigate claude returning an empty result field #empty-result
 
