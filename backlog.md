@@ -1,5 +1,4 @@
 ## Active
-- [>] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
 - [ ] Rewrite validation and state machine #rewrite-flow <- [clipboard, marker-extract]
 - [ ] Prompt template and instruction delivery #prompt-template <- [rewrite-flow]
 - [ ] Session id lifecycle and Ctrl+N #session-lifecycle <- [rewrite-flow]
@@ -11,6 +10,7 @@
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
 - [x] Dummy empty TUI app #tui-dummy
 - [x] CLI args and startup validation #args-cli <- [tui-dummy]
+- [x] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
 - [x] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
 - [x] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]
 - [x] Status line and quit paths #status-quit <- [tui-dummy]
