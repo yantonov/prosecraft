@@ -955,6 +955,28 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_call_outside_the_markers_is_discarded_not_rejected() {
+        // Measured on claude 2026-11-08, 2 runs in 40: with tools denied the model emits an
+        // MCP batch invocation as *streamed text* before it writes the answer. The call sits
+        // outside the markers, so extraction discards it with the rest of the preamble — the
+        // rewrite is still good and must not be reported as an error.
+        let raw = "<invoke name=\"mcp__claude_ai_Docs__batch\">
+<parameter name=\"container\">{\"kind\":\"project\"}</parameter>
+</invoke><<<TEXT>>>Good afternoon. Could you please send me the file?<<<END>>>";
+
+        let mut state = StreamState::new();
+        state.spawn(Instant::now());
+        state.ingest(&[raw_result(raw)], &Claude);
+
+        assert_eq!(state.settle(&exited(0)), Settled::Rewritten);
+        assert_eq!(
+            state.output_text(),
+            "Good afternoon. Could you please send me the file?",
+            "the preamble tool call leaked into the rewrite"
+        );
+    }
+
+    #[test]
     fn a_tool_call_inside_the_markers_is_an_error_that_shows_the_call() {
         let mut state = StreamState::new();
         state.spawn(Instant::now());

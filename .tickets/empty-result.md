@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 3
 deps: []
 attachments: []
 created: 2026-11-08T10:20:00Z
-updated: 2026-11-08T10:20:00Z
+updated: 2026-11-08T10:16:32Z
+closed-at: 2026-11-08T10:16:32Z
 ---
 # Investigate claude returning an empty result field
 
@@ -63,3 +64,42 @@ enough. Cost is one short completion per run, so twenty runs is cheap.
 ## Not in scope
 Changing the marker protocol, falling back to deltas, or treating an empty result as success.
 All three are settled by spec §6.1a and by the project's hard constraint 5.
+
+## Measured 2026-11-08: 20 runs, empty result did NOT reproduce. Closing.
+
+20 runs of the exact §6.2 argv with one fixed prompt:
+
+    empty result      : 0 / 20
+    missing markers   : 0 / 20
+    result != deltas  : 1 / 20
+    tool outside marks: 1 / 20
+
+**The empty-result case did not reproduce once in twenty.** Per this ticket's own rule ('if it
+happens once in twenty: record the measurement, close as not-reproducible'), no code change:
+no new Extraction variant, no message change.
+
+## The one anomaly, which was a different thing entirely
+
+Run 9 (and one earlier ad-hoc run, so 2 in ~40 overall) had deltas != result. Not an empty
+result: the deltas carried a **tool invocation block** before the markers, and the result
+carried only the answer.
+
+    DELTAS: <invoke name="mcp__claude_ai_Claude_Docs__batch">…</invoke><<<TEXT>>>Good afternoon…<<<END>>>
+    RESULT: <<<TEXT>>>Good afternoon…<<<END>>>
+
+So the model, with tools denied, wrote an MCP batch call as *streamed text* and then the
+answer. Nothing executed — this is the failure mode §6.1a step 6 describes, except the call
+landed **outside** the markers, not inside them.
+
+That case is handled correctly and needs no change: the call is labelled `text` in the debug
+pane (it genuinely is streamed text), and extraction discards it with the rest of the preamble
+because it sits outside the markers. Pinned by a new test,
+`panes::tests::a_tool_call_outside_the_markers_is_discarded_not_rejected`, built from the
+measured string.
+
+## Consequence for §6.1a's claim
+
+The spec says 'the concatenated text_deltas are exactly equal to result (76 bytes vs 76
+bytes)'. That holds for 39 runs in 40. The exception is not a delta being dropped — it is
+content that legitimately lives in the deltas and not in the result, which is why the result
+being authoritative (constraint 5) is what keeps the output correct. Worth knowing; no change.
