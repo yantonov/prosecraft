@@ -232,9 +232,10 @@ impl<'a> View<'a> {
                 _ => {}
             }
         }
-        // The clipboard and pane-editing keys (spec §4). `Ctrl+V` is cursor-relative and
-        // respects focus, which is the whole of the paste surface: pasting into a focused source
-        // pane replaces what is there, so no whole-pane replace key is needed alongside it.
+        // The clipboard and pane-editing keys (spec §4). `Ctrl+V` loads the focused editable
+        // pane: it replaces the buffer rather than inserting at the cursor, because the panes
+        // are slots for one block of prose and not documents. `Ctrl+Z` is the recovery, so no
+        // separate whole-pane replace key is needed alongside it.
         // `Ctrl+C` is the copy key and is handled above with the other chords, because a run in
         // the debug pane gives it a second meaning. `Ctrl+K` clears, the one editing action a
         // pane cannot do today without holding Backspace. `Ctrl+Z` undoes the last edit in the
@@ -516,17 +517,22 @@ impl<'a> View<'a> {
     /// implemented, and — on Windows, where `Ctrl+V` is swallowed by the terminal itself — a
     /// burst of ordinary char events, one per char. This is that second case. The chars are
     /// already one action by the time they arrive, so the run is handed to [`View::handle_paste`]
-    /// as a single string: one insert, one undo step.
+    /// as a single string: one replace, one undo step.
     pub fn handle_text_run(&mut self, text: &str) -> Outcome {
         self.handle_paste(text)
     }
 
-    /// A paste, applied as one edit: the whole string in one `insert_str` call.
+    /// A paste, applied as one edit: the pane loaded with the whole string in one call.
     ///
     /// The route does not matter — bracketed paste from the terminal, a `Ctrl+V` the app
     /// handles itself, or a burst of chars collected in `main.rs`. All of them converge here so
-    /// the rule lives in one place: however many chars `text` holds, it is one edit and so one
-    /// `Ctrl+Z`, restoring the text and the cursor together.
+    /// the rule lives in one place: however many chars `text` holds, the focused pane ends up
+    /// holding exactly that, as one edit and so one `Ctrl+Z`, restoring the previous text and
+    /// the cursor together.
+    ///
+    /// The replace lives in the shared funnel deliberately. A rule added to the `Ctrl+V` arm
+    /// alone would not exist on Windows, where the terminal swallows the chord and injects the
+    /// clipboard as char events instead (see [`View::handle_text_run`]).
     ///
     /// The dismissals come first on the rule a key follows: a toast or the help panel eats the
     /// input that closes it, and the paste is not applied behind it.
@@ -541,32 +547,40 @@ impl<'a> View<'a> {
             self.toast = None;
             return Outcome::Continue;
         }
-        // A read-only pane has no cursor to insert at, so the refusal is the same toast
+        // A read-only pane holds no editable buffer to load, so the refusal is the same toast
         // `Ctrl+V` shows rather than a silent no-op.
         if let Err(toast) = self.require_editable() {
             self.toast = Some(toast);
             return Outcome::Continue;
         }
-        // An empty paste is nothing to insert, so it is not an edit and records no step.
+        // An empty paste would wipe the pane and leave nothing to put back, so it is not an
+        // edit and records no step. Not a branch in the replace below: this is the one case
+        // where the pane must keep its content.
         if !text.is_empty() {
-            self.insert_text(text);
+            self.replace_text(text);
         }
         Outcome::Continue
     }
 
-    /// Inserts a whole string into the focused editable pane as one edit.
+    /// Loads the focused editable pane with `text`, replacing its buffer, as one edit.
     ///
-    /// The single place text lands, shared by both paste routes: one `insert_str` call inside
-    /// one `Undo::edit`, so however many chars `text` holds it is one step. A read-only pane has
-    /// already been refused by the caller, which is what lets this assume an editor exists.
-    fn insert_text(&mut self, text: &str) {
+    /// The single place text lands, shared by both paste routes: one `Undo::edit` around a
+    /// clear and an `insert_str`, so however many chars `text` holds it is one step and one
+    /// `Ctrl+Z`. There is no empty-pane branch: clearing an empty pane changes nothing, so the
+    /// same call is already an insert into an empty pane and the undo stack records it once.
+    /// A read-only pane has already been refused by the caller, which is what lets this assume
+    /// an editor exists.
+    fn replace_text(&mut self, text: &str) {
         if let Some((editor, _, undo)) = self.editable(self.focus) {
-            undo.edit(editor, |editor| editor.insert_str(text));
+            undo.edit(editor, |editor| {
+                editor.clear();
+                editor.insert_str(text);
+            });
         }
         self.message = None;
     }
 
-    /// `Ctrl+V`: paste the clipboard into the focused pane, at the cursor.
+    /// `Ctrl+V`: load the focused editable pane with the clipboard, replacing it.
     ///
     /// A read-only pane has no cursor to insert at, so the paste is refused with a toast rather
     /// than silently ignored: the user pressed a key and deserves to know why nothing happened.
@@ -582,7 +596,7 @@ impl<'a> View<'a> {
                 // `insert_str` routes newlines to `insert_newline`, so pasted prose lands as
                 // real lines rather than one long row. Invalid UTF-8 was already made lossy
                 // when the clipboard was read.
-                self.insert_text(&text);
+                self.replace_text(&text);
             }
             // An empty clipboard must never wipe a pane, so it is a note and nothing else.
             Ok(_) => self.message = Some("clipboard is empty".to_owned()),
@@ -762,7 +776,7 @@ const HELP_ROWS: [(&str, &str); 14] = [
     ("Ctrl+← / →", "switch column"),
     ("Ctrl+↑ / ↓", "switch row; no wrap"),
     ("Shift+arrows", "same as Ctrl+arrows"),
-    ("Ctrl+V", "paste into an editable pane"),
+    ("Ctrl+V", "load the focused pane, replacing it"),
     ("Ctrl+K", "clear the focused editable pane"),
     (
         "Ctrl+Z",
@@ -2363,24 +2377,57 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_v_pastes_into_the_focused_editable_pane_at_the_cursor() {
+    fn ctrl_v_replaces_the_focused_editable_pane() {
         let mut view = clipboard_view(Focus::Source, crate::clipboard::Recording::with("pasted"));
-        view.source = Editor::from_text("ab");
-        view.source.set_cursor(0, 1);
+        view.source = Editor::from_text("old paragraph");
+        view.source.set_cursor(0, 4);
         let _ = draw_at(&mut view, 80, 24);
 
         view.handle_key(&ctrl_char('v'));
 
         assert_eq!(
             view.source.text(),
-            "apastedb",
-            "paste did not land at the cursor"
+            "pasted",
+            "the paste appended instead of replacing"
         );
         assert_eq!(
             view.instructions.text(),
             "",
             "the wrong pane was pasted into"
         );
+    }
+
+    #[test]
+    fn ctrl_v_into_instructions_leaves_the_source_alone() {
+        let mut view = clipboard_view(
+            Focus::Instructions,
+            crate::clipboard::Recording::with("translated"),
+        );
+        view.source = Editor::from_text("source text");
+        view.instructions = Editor::from_text("old instructions");
+
+        view.handle_key(&ctrl_char('v'));
+
+        assert_eq!(view.instructions.text(), "translated");
+        assert_eq!(view.source.text(), "source text", "the paste leaked");
+        assert_eq!(view.focus, Focus::Instructions, "the paste moved focus");
+    }
+
+    #[test]
+    fn a_paste_that_replaces_is_one_step_that_restores_the_old_text() {
+        // The recovery for a replaced pane is one `Ctrl+Z`, text and cursor together.
+        for focus in [Focus::Source, Focus::Instructions] {
+            let mut view = editing_view(focus, "the old paragraph");
+            let before_text = pane_text(&view, focus);
+            let before_cursor = pane_cursor(&view, focus);
+
+            view.handle_paste("the new one");
+            assert_eq!(pane_text(&view, focus), "the new one");
+
+            view.handle_key(&ctrl_char('z'));
+            assert_eq!(pane_text(&view, focus), before_text, "{focus:?}");
+            assert_eq!(pane_cursor(&view, focus), before_cursor, "{focus:?}");
+        }
     }
 
     #[test]
@@ -2431,7 +2478,7 @@ mod tests {
 
             assert_eq!(
                 pane_text(&view, focus),
-                "start|one\ntwo\nthree",
+                "one\ntwo\nthree",
                 "{focus:?} did not take the paste"
             );
 
@@ -2565,14 +2612,18 @@ mod tests {
         let before_cursor = view.source.cursor();
 
         view.handle_key(&ctrl_char('v'));
-        assert_eq!(view.source.text(), "start|one\ntwo\nthreeend");
+        assert_eq!(
+            view.source.text(),
+            "one\ntwo\nthree",
+            "the paste appended to the old text"
+        );
 
         // Exactly one press takes the whole block back out, byte for byte.
         view.handle_key(&ctrl_char('z'));
         assert_eq!(
             view.source.text(),
             before_text,
-            "one press left part of the paste"
+            "one press left the paste in place"
         );
         assert_eq!(
             view.source.cursor(),

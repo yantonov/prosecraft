@@ -139,7 +139,8 @@ A few things worth knowing:
   why and focus moves to the offending pane.
 - `Ctrl+N` starts a new harness session — the context is dropped, source and instructions
   are kept. Use it when the instructions drifted away from the original text.
-- `Ctrl+V` pastes into the focused editable pane, `Ctrl+K` clears it, `Ctrl+C` copies the
-  focused pane, `Ctrl+Q` quits. `Ctrl+C` in the process pane during a run cancels it, after
-  a second confirming press.
+- `Ctrl+V` replaces the focused editable pane with the clipboard, `Ctrl+K` clears it,
+  `Ctrl+C` copies the focused pane, `Ctrl+Q` quits. A replaced pane comes back with one
+  `Ctrl+Z`. `Ctrl+C` in the process pane during a run cancels it, after a second confirming
+  press.
 - `F1` shows every key binding; the status line only carries the three that fit.

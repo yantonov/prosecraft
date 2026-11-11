@@ -1,4 +1,5 @@
 ## Active
+- [>] g4nxst #g4nxst
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
