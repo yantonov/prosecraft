@@ -509,6 +509,40 @@ impl<'a> View<'a> {
         self.session = session.map(str::to_owned);
     }
 
+    /// A paste the terminal delivered whole, as one edit.
+    ///
+    /// Bracketed paste (enabled in `main.rs` beside the alternate screen) turns a paste into
+    /// one `Event::Paste` instead of a burst of char keys, so the undo recording boundary is
+    /// reached once: one `Ctrl+Z` takes the whole fragment back out, byte-identical to the
+    /// state before it, cursor included. `Ctrl+V` is the same rule by the other route, since
+    /// it already inserts the clipboard in a single call.
+    ///
+    /// The dismissals come first on the rule a key follows: a toast or the help panel eats the
+    /// input that closes it, and the paste is not applied behind it.
+    pub fn handle_paste(&mut self, text: &str) -> Outcome {
+        // Set first, like `handle_key`: dismissals change what the frame shows too.
+        self.dirty = true;
+        if self.help {
+            self.help = false;
+            return Outcome::Continue;
+        }
+        if self.toast.is_some() {
+            self.toast = None;
+            return Outcome::Continue;
+        }
+        // A read-only pane has no cursor to insert at, so the refusal is the same toast
+        // `Ctrl+V` shows rather than a silent no-op.
+        if let Err(toast) = self.require_editable() {
+            self.toast = Some(toast);
+            return Outcome::Continue;
+        }
+        if let Some((editor, _, undo)) = self.editable(self.focus) {
+            undo.edit(editor, |editor| editor.insert_str(text));
+        }
+        self.message = None;
+        Outcome::Continue
+    }
+
     /// `Ctrl+V`: paste the clipboard into the focused pane, at the cursor.
     ///
     /// A read-only pane has no cursor to insert at, so the paste is refused with a toast rather
@@ -523,8 +557,10 @@ impl<'a> View<'a> {
                 // `insert_str` routes newlines to `insert_newline`, so pasted prose lands as
                 // real lines rather than one long row. Invalid UTF-8 was already made lossy
                 // when the clipboard was read.
-                // One call, so a paste is one undo step: a single `Ctrl+Z` takes the whole block
-                // back out.
+                // One call, so a clipboard paste is one undo step: a single `Ctrl+Z` takes the
+                // whole block back out. This is the `Ctrl+V` path only; a terminal paste
+                // arrives as `Event::Paste` and is one step for the same reason, see
+                // [`View::handle_paste`].
                 if let Some((editor, _, undo)) = self.editable(self.focus) {
                     undo.edit(editor, |editor| editor.insert_str(&text));
                 }
@@ -2362,6 +2398,68 @@ mod tests {
             assert_eq!(view.stream.output_text(), before_output);
             assert_eq!(view.stream.debug_text(), before_debug);
         }
+    }
+
+    #[test]
+    fn a_terminal_paste_is_one_undo_step() {
+        // The reported bug: a bracketed paste is one event, so it must be one edit and one
+        // `Ctrl+Z`, exactly like `Ctrl+V`. Without the protocol each char arrives as a key and
+        // the paste becomes one step per char.
+        for focus in [Focus::Source, Focus::Instructions] {
+            let mut view = editing_view(focus, "start|");
+            let before = pane_text(&view, focus);
+
+            view.handle_paste("one\ntwo\nthree");
+
+            assert_eq!(
+                pane_text(&view, focus),
+                "start|one\ntwo\nthree",
+                "{focus:?} did not take the paste"
+            );
+
+            view.handle_key(&ctrl_char('z'));
+
+            // One press, back to the state before the paste, cursor included.
+            assert_eq!(
+                pane_text(&view, focus),
+                before,
+                "{focus:?} took many presses"
+            );
+            assert_eq!(pane_cursor(&view, focus), crate::editor::Cursor::new(0, 6));
+        }
+    }
+
+    #[test]
+    fn a_terminal_paste_in_a_read_only_pane_is_refused_like_ctrl_v() {
+        for focus in [Focus::Output, Focus::Debug] {
+            let mut view = editing_view(focus, "source");
+            let before_output = view.stream.output_text();
+            let before_debug = view.stream.debug_text();
+
+            view.handle_paste("pasted");
+
+            let toast = view.toast.as_deref().expect("no refusal shown");
+            assert!(
+                toast.contains("read-only"),
+                "the toast should say why: {toast}"
+            );
+            assert_eq!(view.focus, focus, "the refusal moved focus");
+            assert_eq!(view.source.text(), "source", "the refusal edited a pane");
+            assert_eq!(view.stream.output_text(), before_output);
+            assert_eq!(view.stream.debug_text(), before_debug);
+        }
+    }
+
+    #[test]
+    fn a_paste_that_closes_the_help_panel_does_not_also_land() {
+        // The dismissal eats the input, the same rule every key follows.
+        let mut view = editing_view(Focus::Source, "");
+        view.help = true;
+
+        view.handle_paste("pasted");
+
+        assert!(!view.help, "the panel stayed open");
+        assert_eq!(view.source.text(), "", "the paste landed behind the panel");
     }
 
     #[test]

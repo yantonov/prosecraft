@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
@@ -91,7 +91,11 @@ impl Tui {
 
     fn enter_alternate_screen(config: Config) -> io::Result<Self> {
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        // Bracketed paste is enabled with the screen it belongs to: without it a terminal
+        // paste arrives as a burst of key events, and the editor records one undo step per
+        // char. With it the whole paste is one `Event::Paste` and one step. Terminals that do
+        // not implement the protocol simply never send the markers, so typing still works.
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(stdout))?,
             config,
@@ -131,6 +135,9 @@ impl Tui {
                 }
                 let outcome = match event::read()? {
                     Event::Key(key) => view.handle_key(&key),
+                    // A bracketed paste is one event and one edit, which is what makes it one
+                    // `Ctrl+Z` rather than one per char.
+                    Event::Paste(text) => view.handle_paste(&text),
                     // Resize and every other event leave the state alone; there is still a
                     // frame to draw for them, so they are not a quit.
                     _ => Outcome::Continue,
@@ -217,7 +224,14 @@ fn claim_restore(flag: &AtomicBool) -> bool {
 }
 
 fn write_restore(out: &mut impl Write) -> io::Result<()> {
-    execute!(out, LeaveAlternateScreen, cursor::Show)
+    // The bracketed-paste reset goes out with the screen it was enabled on, so a shell that
+    // inherits the terminal does not keep wrapping pastes in markers it cannot see.
+    execute!(
+        out,
+        LeaveAlternateScreen,
+        DisableBracketedPaste,
+        cursor::Show
+    )
 }
 
 fn install_panic_hook() {
@@ -513,5 +527,9 @@ mod tests {
             "alternate screen kept: {out:?}"
         );
         assert!(out.contains("\u{1b}[?25h"), "cursor left hidden: {out:?}");
+        assert!(
+            out.contains("\u{1b}[?2004l"),
+            "bracketed paste left on: {out:?}"
+        );
     }
 }

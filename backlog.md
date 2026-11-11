@@ -44,6 +44,7 @@
 - [x] Lift the undo/redo non-goal from the spec #horaf
 - [x] Editor owns every buffer mutation: flatten the public call graph, add Editor::clear #li4i2
 - [x] Ctrl+Z: undo the last edits in an editable pane, capped history #tqtl6 <- [horaf, li4i2]
+- [x] Bracketed paste: a terminal paste is one undo step #e6cixd
 - [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
