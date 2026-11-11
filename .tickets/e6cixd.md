@@ -1,4 +1,5 @@
 ---
+title: "Bracketed paste: a terminal paste is one undo step"
 status: closed
 priority: 2
 deps: []

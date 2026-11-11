@@ -1,4 +1,5 @@
 ---
+title: "CLI args and startup validation"
 status: closed
 priority: 0
 deps: [tui-dummy]

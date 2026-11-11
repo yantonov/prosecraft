@@ -1,4 +1,5 @@
 ---
+title: "Ctrl+K clears the focused editable pane"
 status: closed
 priority: 2
 deps: []

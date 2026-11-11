@@ -1,4 +1,5 @@
 ---
+title: "Editor core: buffer, cursor, edit operations"
 status: closed
 priority: 2
 deps: [layout-panes, tui-dummy]

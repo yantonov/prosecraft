@@ -1,4 +1,5 @@
 ---
+title: "Makefile install target: release build, stamp git hash, copy to ~/.local/bin"
 status: closed
 priority: 2
 deps: []

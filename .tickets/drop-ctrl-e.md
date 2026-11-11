@@ -1,4 +1,5 @@
 ---
+title: "Drop Ctrl+E: Ctrl+V on the focused pane is enough"
 status: closed
 priority: 2
 deps: []

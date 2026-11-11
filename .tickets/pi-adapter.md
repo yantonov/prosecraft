@@ -1,4 +1,5 @@
 ---
+title: "pi adapter"
 status: closed
 priority: 3
 deps: [harness-trait, session-lifecycle]

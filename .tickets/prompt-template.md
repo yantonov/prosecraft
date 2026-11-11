@@ -1,4 +1,5 @@
 ---
+title: "Prompt template and instruction delivery"
 status: closed
 priority: 2
 deps: [rewrite-flow]

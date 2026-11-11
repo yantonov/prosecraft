@@ -1,4 +1,5 @@
 ---
+title: "Keys are drawn only when a tick reports a change, so nothing typed shows"
 status: closed
 priority: 0
 deps: []

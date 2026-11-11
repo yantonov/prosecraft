@@ -1,4 +1,5 @@
 ---
+title: "Pin LF line endings with .gitattributes"
 status: closed
 priority: 3
 deps: [tui-dummy]

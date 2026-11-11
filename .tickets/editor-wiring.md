@@ -1,4 +1,5 @@
 ---
+title: "Wire Editor and wrap into the editable panes"
 status: closed
 priority: 2
 deps: [editor-wrap, pane-routing]

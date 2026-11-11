@@ -1,4 +1,5 @@
 ---
+title: "Live verify: codex end to end, session carried across rewrites, sandbox holds in-app"
 status: closed
 priority: 2
 deps: [k6rqhh, x3dtv2]

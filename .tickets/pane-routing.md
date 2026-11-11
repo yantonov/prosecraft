@@ -1,4 +1,5 @@
 ---
+title: "Output pane from final text, debug pane from stream"
 status: closed
 priority: 2
 deps: [editor-wrap, process-spawn]

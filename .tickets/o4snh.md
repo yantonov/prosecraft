@@ -1,4 +1,5 @@
 ---
+title: "Resolve the harness program once, identically for the startup check and the spawn"
 status: closed
 priority: 1
 deps: []

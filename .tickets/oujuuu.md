@@ -1,4 +1,5 @@
 ---
+title: "F1 help panel: key bindings overlay"
 status: closed
 priority: 3
 deps: []

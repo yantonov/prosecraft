@@ -1,4 +1,5 @@
 ---
+title: "Strip progress from the spec, and bring it in line with the shipped app"
 status: closed
 priority: 2
 deps: []

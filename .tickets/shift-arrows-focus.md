@@ -1,4 +1,5 @@
 ---
+title: "Bind focus moves to Shift+arrows as well as Ctrl+arrows"
 status: closed
 priority: 2
 deps: []

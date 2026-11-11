@@ -1,4 +1,5 @@
 ---
+title: "Clipboard: load, copy, paste"
 status: closed
 priority: 2
 deps: [editor-wrap, tui-dummy]

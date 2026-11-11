@@ -1,4 +1,5 @@
 ---
+title: "Editor wrapping: soft-wrap rendering and wrap-aware movement"
 status: closed
 priority: 2
 deps: [editor-widget]

@@ -1,4 +1,5 @@
 ---
+title: "Process spawn and stream readers"
 status: closed
 priority: 2
 deps: [harness-trait]

@@ -1,4 +1,5 @@
 ---
+title: "Bootstrap harness: AGENTS.md + Makefile"
 status: closed
 priority: 0
 deps: [tui-dummy]

@@ -1,4 +1,5 @@
 ---
+title: "pi on Windows: deliver the prompt on stdin when the harness resolves to a batch shim"
 status: closed
 priority: 2
 deps: [o4snh]

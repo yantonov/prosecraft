@@ -1,4 +1,5 @@
 ---
+title: "Apache 2.0 licence: Yury Antonov, 2026"
 status: closed
 priority: 2
 deps: [tui-dummy]

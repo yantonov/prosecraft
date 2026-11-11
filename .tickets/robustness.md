@@ -1,4 +1,5 @@
 ---
+title: "Robustness: cancel, timeout, resize, error paths"
 status: closed
 priority: 3
 deps: [session-lifecycle]

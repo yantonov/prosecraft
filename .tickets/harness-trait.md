@@ -1,4 +1,5 @@
 ---
+title: "Harness trait and claude argv builder"
 status: closed
 priority: 2
 deps: [harness-bootstrap]

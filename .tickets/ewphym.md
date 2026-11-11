@@ -1,4 +1,5 @@
 ---
+title: "Burst collector: skip key releases instead of ending the run at them"
 status: closed
 priority: 2
 deps: []

@@ -1,4 +1,5 @@
 ---
+title: "Editor owns every buffer mutation: flatten the public call graph, add Editor::clear"
 status: closed
 priority: 2
 deps: []

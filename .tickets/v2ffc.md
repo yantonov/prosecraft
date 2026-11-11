@@ -1,4 +1,5 @@
 ---
+title: "Amend spec for codex: measured argv, session-from-stream, no delta stream"
 status: closed
 priority: 1
 deps: []

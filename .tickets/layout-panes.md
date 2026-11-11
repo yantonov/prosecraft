@@ -1,4 +1,5 @@
 ---
+title: "Four-pane layout and focus cycling"
 status: closed
 priority: 2
 deps: [args-cli, tui-dummy]

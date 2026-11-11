@@ -1,4 +1,5 @@
 ---
+title: "Status line drops the Tab hint"
 status: closed
 priority: 2
 deps: []

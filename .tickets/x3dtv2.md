@@ -1,4 +1,5 @@
 ---
+title: "codex adapter: exec/exec resume argv, agent_message terminal text, thread id from the stream"
 status: closed
 priority: 1
 deps: [r26q4, v2ffc]

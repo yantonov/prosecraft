@@ -1,4 +1,5 @@
 ---
+title: "Wire --harness codex through the CLI, the adapter factory, and the startup lookup"
 status: closed
 priority: 1
 deps: [r26q4]

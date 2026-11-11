@@ -1,4 +1,5 @@
 ---
+title: "Status line and quit paths"
 status: closed
 priority: 2
 deps: [tui-dummy]

@@ -1,4 +1,5 @@
 ---
+title: "Dummy empty TUI app"
 status: closed
 priority: 0
 deps: []

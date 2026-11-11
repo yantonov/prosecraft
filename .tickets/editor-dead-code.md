@@ -1,4 +1,5 @@
 ---
+title: "Remove the dead_code allowance from src/editor.rs"
 status: closed
 priority: 3
 deps: [editor-wiring]

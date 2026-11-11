@@ -1,4 +1,5 @@
 ---
+title: "Plain q must not quit: it types in an editable pane"
 status: closed
 priority: 1
 deps: []

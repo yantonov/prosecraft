@@ -1,4 +1,5 @@
 ---
+title: "Ctrl+Z: undo the last edits in an editable pane, capped history"
 status: closed
 priority: 2
 deps: [horaf, li4i2]

@@ -1,4 +1,5 @@
 ---
+title: "Rewrite validation and state machine"
 status: closed
 priority: 2
 deps: [clipboard, marker-extract]

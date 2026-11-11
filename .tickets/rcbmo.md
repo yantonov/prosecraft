@@ -1,4 +1,5 @@
 ---
+title: "README: codex as a third harness, and the two ways it is not equal"
 status: closed
 priority: 2
 deps: [x3dtv2]

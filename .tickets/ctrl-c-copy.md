@@ -1,4 +1,5 @@
 ---
+title: "Ctrl+C copies; halting a run needs the debug pane and a confirmation"
 status: closed
 priority: 2
 deps: []

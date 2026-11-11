@@ -1,4 +1,5 @@
 ---
+title: "Ctrl+R puts focus on the output pane"
 status: closed
 priority: 2
 deps: []

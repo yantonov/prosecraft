@@ -1,4 +1,5 @@
 ---
+title: "Burst collector: apply the grace window to the first char too"
 status: closed
 priority: 2
 deps: []

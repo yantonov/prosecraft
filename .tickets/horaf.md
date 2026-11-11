@@ -1,4 +1,5 @@
 ---
+title: "Lift the undo/redo non-goal from the spec"
 status: closed
 priority: 2
 deps: []

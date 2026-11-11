@@ -1,4 +1,5 @@
 ---
+title: "Drop Ctrl+Y: Ctrl+C is the only copy key"
 status: closed
 priority: 2
 deps: []
