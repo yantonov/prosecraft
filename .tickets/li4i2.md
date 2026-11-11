@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 2
 deps: []
 attachments: []
 created: 2026-11-11T11:22:35Z
-updated: 2026-11-11T11:29:26Z
+updated: 2026-11-11T11:39:30Z
+closed-at: 2026-11-11T11:39:30Z
 ---
 # Editor owns every buffer mutation: flatten the public call graph, add Editor::clear
 Refactor. No behaviour change. Precondition for undo: makes "one public Editor call = one undoable step" true by construction.
