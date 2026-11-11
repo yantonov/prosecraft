@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: []
 attachments: []
 created: 2026-11-11T14:39:50Z
-updated: 2026-11-11T14:39:53Z
+updated: 2026-11-11T14:40:53Z
+closed-at: 2026-11-11T14:40:53Z
 ---
 # u3mle
 Shift+Insert is the second real paste convention — conhost, xterm, PuTTY and VS Code all speak it — and the app ignores it today: it misses every arm in the editable block and dies in route_focus. Ctrl+Shift+V, Cmd+V and Ctrl+Y stay out on purpose: the first two are consumed by the terminal so the app never sees them, and Ctrl+Y is the readline kill-ring yank, which this app has no ring for (and Ctrl+Y is retired here anyway, see nxm5v).
