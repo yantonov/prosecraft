@@ -141,6 +141,6 @@ A few things worth knowing:
   are kept. Use it when the instructions drifted away from the original text.
 - `Ctrl+V` replaces the focused editable pane with the clipboard, `Ctrl+K` clears it,
   `Ctrl+C` copies the focused pane, `Ctrl+Q` quits. A replaced pane comes back with one
-  `Ctrl+Z`. `Ctrl+C` in the process pane during a run cancels it, after a second confirming
-  press.
+  `Ctrl+Z`. `Shift+Insert` is the same paste under its other conventional spelling. `Ctrl+C`
+  in the process pane during a run cancels it, after a second confirming press.
 - `F1` shows every key binding; the status line only carries the three that fit.

@@ -129,6 +129,7 @@ Four panes, all focusable. Two columns, 50/50.
 | `Shift+←` / `Shift+→` | Switch column. Same as `Ctrl+←` / `Ctrl+→` |
 | `Shift+↑` / `Shift+↓` | Switch row. Same as `Ctrl+↑` / `Ctrl+↓` |
 | `Ctrl+V` | Load the clipboard into the focused pane, replacing it (editable panes only) |
+| `Shift+Insert` | The same paste, under its other conventional spelling (editable panes only) |
 | `Ctrl+K` | Clear the focused pane (editable panes only) |
 | `Ctrl+Z` | Undo the last edit in the focused editable pane, one step per key event. The app refuses in `output` and `debug` with the read-only note. Capped history, no redo |
 | arrow keys | Move cursor (editable) or scroll (read-only) |

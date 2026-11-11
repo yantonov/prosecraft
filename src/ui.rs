@@ -236,10 +236,17 @@ impl<'a> View<'a> {
         // pane: it replaces the buffer rather than inserting at the cursor, because the panes
         // are slots for one block of prose and not documents. `Ctrl+Z` is the recovery, so no
         // separate whole-pane replace key is needed alongside it.
+        // `Shift+Insert` is the same paste under its other conventional spelling, which conhost,
+        // xterm and PuTTY all speak. It is checked here, before the editable-pane block, so the
+        // chord never reaches the editor as a stray key.
         // `Ctrl+C` is the copy key and is handled above with the other chords, because a run in
         // the debug pane gives it a second meaning. `Ctrl+K` clears, the one editing action a
         // pane cannot do today without holding Backspace. `Ctrl+Z` undoes the last edit in the
         // focused editable pane (spec §4, §9), which is what makes the two destructive ones safe.
+        if key.code == KeyCode::Insert && key.modifiers == KeyModifiers::SHIFT {
+            self.paste();
+            return Outcome::Continue;
+        }
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
                 KeyCode::Char('v') => {
@@ -580,7 +587,8 @@ impl<'a> View<'a> {
         self.message = None;
     }
 
-    /// `Ctrl+V`: load the focused editable pane with the clipboard, replacing it.
+    /// `Ctrl+V` and `Shift+Insert`: load the focused editable pane with the clipboard,
+    /// replacing it.
     ///
     /// A read-only pane has no cursor to insert at, so the paste is refused with a toast rather
     /// than silently ignored: the user pressed a key and deserves to know why nothing happened.
@@ -758,7 +766,7 @@ fn draw_toast(frame: &mut Frame, text: &str, area: Rect) {
 /// table, because this list is that table's only on-screen copy: a binding that is added there
 /// and forgotten here would be invisible to the user. The arrows are the spec's own glyphs, and
 /// they are also the widest cell in the column.
-const HELP_ROWS: [(&str, &str); 14] = [
+const HELP_ROWS: [(&str, &str); 15] = [
     ("Ctrl+R", "rewrite, or resend into the same session"),
     (
         "Ctrl+N",
@@ -777,6 +785,7 @@ const HELP_ROWS: [(&str, &str); 14] = [
     ("Ctrl+↑ / ↓", "switch row; no wrap"),
     ("Shift+arrows", "same as Ctrl+arrows"),
     ("Ctrl+V", "load the focused pane, replacing it"),
+    ("Shift+Insert", "same paste, second spelling"),
     ("Ctrl+K", "clear the focused editable pane"),
     (
         "Ctrl+Z",
@@ -2395,6 +2404,70 @@ mod tests {
             "",
             "the wrong pane was pasted into"
         );
+    }
+
+    #[test]
+    fn shift_insert_is_the_same_paste_as_ctrl_v() {
+        let mut view = clipboard_view(Focus::Source, crate::clipboard::Recording::with("pasted"));
+        view.source = Editor::from_text("old paragraph");
+
+        view.handle_key(&KeyEvent::new(KeyCode::Insert, KeyModifiers::SHIFT));
+
+        assert_eq!(view.source.text(), "pasted", "Shift+Insert did not paste");
+        assert_eq!(
+            view.instructions.text(),
+            "",
+            "the wrong pane was pasted into"
+        );
+        assert!(
+            view.message.is_none(),
+            "a working paste left a note: {:?}",
+            view.message
+        );
+    }
+
+    #[test]
+    fn shift_insert_in_a_read_only_pane_is_refused_with_a_toast() {
+        for focus in [Focus::Output, Focus::Debug] {
+            let mut view = clipboard_view(focus, crate::clipboard::Recording::with("pasted"));
+            let before_output = view.stream.output_text();
+            let before_debug = view.stream.debug_text();
+
+            view.handle_key(&KeyEvent::new(KeyCode::Insert, KeyModifiers::SHIFT));
+
+            let toast = view.toast.as_deref().expect("no refusal shown");
+            assert!(
+                toast.contains("read-only"),
+                "the toast should say why: {toast}"
+            );
+            assert_eq!(view.focus, focus, "the refusal moved focus");
+            assert_eq!(view.stream.output_text(), before_output);
+            assert_eq!(view.stream.debug_text(), before_debug);
+        }
+    }
+
+    #[test]
+    fn ctrl_insert_is_not_a_paste_key() {
+        // The retired-key rule: a chord the app does not bind must not quietly do something.
+        for focus in Focus::ALL {
+            let mut view = clipboard_view(focus, crate::clipboard::Recording::with("pasted"));
+            view.source = Editor::from_text("keep me");
+            view.instructions = Editor::from_text("keep this too");
+
+            view.handle_key(&ctrl(KeyCode::Insert));
+
+            assert_eq!(
+                view.source.text(),
+                "keep me",
+                "Ctrl+Insert pasted at {focus:?}"
+            );
+            assert_eq!(view.instructions.text(), "keep this too", "{focus:?}");
+            assert_eq!(view.focus, focus, "Ctrl+Insert moved focus from {focus:?}");
+            assert!(
+                view.message.is_none() && view.toast.is_none(),
+                "Ctrl+Insert left a note at {focus:?}"
+            );
+        }
     }
 
     #[test]
