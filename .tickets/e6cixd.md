@@ -4,8 +4,8 @@ priority: 2
 deps: []
 attachments: []
 created: 2026-11-11T11:57:19Z
-updated: 2026-11-11T12:23:40Z
-closed-at: 2026-11-11T12:23:40Z
+updated: 2026-11-11T12:34:48Z
+closed-at: 2026-11-11T12:34:48Z
 ---
 # Bracketed paste: a terminal paste is one undo step
 
@@ -50,3 +50,17 @@ handle_key, so typing keeps one step per key and nothing is delayed. Event::Past
 terminals that do implement the protocol. The wait is zero until two chars have arrived
 together; once a burst is proven a 10 ms grace window drains a paste larger than the console
 input buffer instead of splitting it into several steps.
+
+
+
+## Closed too early
+
+This ticket was closed with 5aa09ee while the bug was still live: the burst collector it added
+was defeated twice more, and each fix needed its own ticket.
+
+- #ewphym - releases ended the run, so every run was one char.
+- #jspxg2 - the first char was split off from the rest of the fragment.
+
+The record now matches the commits: 5aa09ee, 1884c9c and dbfb029 each carry a ticket, and
+those two were filed after their commits landed rather than before, which is the WIP=1
+violation this note records.
