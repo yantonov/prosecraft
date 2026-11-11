@@ -153,17 +153,13 @@ impl Tui {
                         // the burst as one string is what makes it one edit and one `Ctrl+Z`;
                         // handling the events one at a time would record one step per char.
                         //
-                        // The wait is zero until a burst is proven, so a typed char is never
-                        // delayed; once two chars have arrived together a short grace window
-                        // lets a paste larger than the console input buffer be drained without
-                        // splitting it into several undo steps.
+                        // The wait is applied to every char, including the first: a paste is
+                        // injected by the terminal rather than queued in one go, so a zero wait
+                        // for the first char splits it into its own edit and leaves the rest as
+                        // a second. The window is far below the interval between two human
+                        // keypresses, so typing keeps one step per key.
                         let (text, count, ended_by) = collect_text_run(key, |seen| {
-                            let wait = if seen < 2 {
-                                Duration::ZERO
-                            } else {
-                                BURST_GRACE
-                            };
-                            if !event::poll(wait)? {
+                            if !event::poll(next_char_wait(seen))? {
                                 return Ok(None);
                             }
                             event::read().map(Some)
@@ -219,6 +215,20 @@ fn typed_char(key: &KeyEvent) -> Option<char> {
 /// gap between two human keypresses, and it never applies to a single typed char, so typing
 /// keeps its own granularity and no keystroke is delayed.
 const BURST_GRACE: Duration = Duration::from_millis(10);
+
+/// How long to wait for the next char of a run, given how many have arrived.
+///
+/// The window is the same for the first char as for the rest, which is the point. A paste is
+/// injected by the terminal, so its chars are not already queued at the instant the first one
+/// arrives; a zero wait for the first char therefore ends the run at `count == 1`, splits the
+/// first symbol off into its own edit, and leaves the rest as a second. That was the bug where
+/// the fragment came back in one `Ctrl+Z` but the first symbol needed another.
+///
+/// The window is far below the gap between two human keypresses, so a typed char is not
+/// meaningfully delayed and each one still records its own step.
+fn next_char_wait(_seen: usize) -> Duration {
+    BURST_GRACE
+}
 
 /// Gathers the run of char events the terminal has already queued into one string.
 ///
@@ -432,6 +442,18 @@ mod tests {
         assert_eq!(text, "helo", "a release event cut the run short");
         assert_eq!(count, 4, "the run counted the wrong number of chars");
         assert!(ended_by.is_none(), "the run ended early: {ended_by:?}");
+    }
+
+    #[test]
+    fn the_first_char_waits_as_long_as_the_rest() {
+        // Pinning the bug: a zero wait for the first char split the pasted fragment into two
+        // edits, so the fragment came back in one Ctrl+Z and the first symbol needed another.
+        assert_eq!(
+            next_char_wait(0),
+            next_char_wait(1),
+            "the first char is treated differently, which splits a paste"
+        );
+        assert_eq!(next_char_wait(0), BURST_GRACE);
     }
 
     #[test]
