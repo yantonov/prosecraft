@@ -10,8 +10,10 @@
 //! *logical* line; visual rows, width-aware movement and scroll-to-cursor belong to the wrap
 //! ticket and are built on top of this module.
 //!
-//! There is no selection and no undo (spec §2), and no key handling: the cursor is a model,
-//! so every operation is directly testable without a terminal.
+//! There is no selection and no history inside this type (spec §2), and no key handling: the
+//! cursor is a model, so every operation is directly testable without a terminal. Undo is a
+//! snapshot stack kept per pane by the caller (§9), which is why this type has to keep one
+//! step equal to one public call: no public method here may call another one.
 
 /// A position in the buffer: a line index and a char index within that line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]

@@ -15,7 +15,7 @@ history forward.
 
 ### Non-goals (v0.1)
 
-- Editing history, undo/redo.
+- Editing history and redo. Undo of the two editable buffers is in scope (§4).
 - Multi-turn chat with the model, or any conversation view.
 - **Any filesystem or side effect on the system.** The app shows text and talks to the
   harness. It reads the clipboard, writes the clipboard, and nothing else. Harness tool
@@ -130,6 +130,7 @@ Four panes, all focusable. Two columns, 50/50.
 | `Shift+↑` / `Shift+↓` | Switch row; same as `Ctrl+↑` / `Ctrl+↓` |
 | `Ctrl+V` | Paste the clipboard into the focused pane (editable panes only) |
 | `Ctrl+K` | Clear the focused pane (editable panes only) |
+| `Ctrl+Z` | Undo the last edit in the focused editable pane, one step per key event; refused with the read-only note in `output` and `debug`. Capped history, no redo |
 | arrow keys | Move cursor (editable) or scroll (read-only) |
 | `PgUp` / `PgDn` | Scroll by a page in the focused pane |
 | `F1` | Toggle the key-bindings help panel. Any key closes it; the key that closes it does nothing else |
@@ -415,7 +416,8 @@ Consequences:
   (`err`), and app events (`app`: run start, exit, duration, errors). Reasoning is visible
   here on purpose — it is the debug view, and it cannot be mistaken for the result.
 - On spawn the output pane is cleared, so the view plainly states that a new action started.
-  There is no undo (§2); the previous result is deliberately lost at that moment.
+  The previous result is deliberately lost at that moment: `Ctrl+Z` undoes edits to the two
+  editable buffers only, never the read-only panes.
 - Nothing is interpreted as markdown. A half-emitted fence or `**` is shown literally, so a
   partial stream can never corrupt the display.
 - Events are drained from the `mpsc` channel once per UI tick (~16 ms) and rendered once per
@@ -699,6 +701,13 @@ Ratatui ships no text editor widget, so the two editable panes need a small shar
 type: buffer, cursor, soft-wrap-aware vertical movement, insert/delete, and no selection.
 It is written once and used by both panes.
 
+Undo is a bounded stack of buffer snapshots kept per pane beside the wrap state, not inside
+the editor type: a snapshot is `(lines, cursor)`, and a history of editors stored inside an
+editor would make the snapshot recursive. One step is one public editor call, which
+is why the editor's public methods must not call each other (a paste is one call, so it is
+one step). A snapshot is recorded only when the buffer actually changed, so no-op edits cost
+nothing.
+
 Testability: `Harness::build` is pure → argv table tests. `process.rs` is tested against a
 fake binary (a shell script echoing fixed output, sleeping, or exiting non-zero). The state
 machine is tested headlessly, with the terminal backend stubbed.
@@ -759,6 +768,8 @@ fixed at init from the command line, with no TUI selection; instructions are rea
 startup and never reloaded (restart after editing the file); `Ctrl+N` while running is
 ignored like `Ctrl+R`; the name stays `prosecraft`; the rewritten text is delimited by
 `<<<TEXT>>>`/`<<<END>>>` markers so preambles are stripped by protocol, not by heuristic,
-and a missing marker is an error rather than a guess.
+and a missing marker is an error rather than a guess; undo is in scope for the two editable
+buffers and only for them (§4, §9) — a capped per-pane snapshot stack, one step per key
+event, no redo, and it never reaches `output` or `debug`.
 
 

@@ -523,12 +523,10 @@ impl<'a> View<'a> {
 
     /// `Ctrl+K`: clear the focused pane (spec §4).
     ///
-    /// There is no undo (§2), so this key exists because the other way to empty a pane is to
-    /// hold Backspace. The clipboard is where the text goes back from: `Ctrl+K` then `Ctrl+V`
-    /// is the recovery the user has.
-    ///
-    /// The wrap state is replaced along with the buffer: it holds a scroll offset and the last
-    /// draw's width, and a fresh empty buffer makes both meaningless.
+    /// This exists because the other way to empty a pane is to hold Backspace. `Ctrl+Z`
+    /// (spec §4) is the recovery the user has, which is why the clear goes through the editor
+    /// method rather than replacing the value: a cleared buffer is one undo step like any
+    /// other edit.
     fn clear(&mut self) {
         if let Err(toast) = self.require_editable() {
             self.toast = Some(toast);

@@ -39,8 +39,9 @@ What it deliberately is not:
   reset there is.
 - **No filesystem side effects.** It reads and writes the clipboard and talks to the
   harness. That is all.
-- **No chat view, no undo, no model picker.** The harness and the model are chosen on the
-  command line and fixed for the run.
+- **No chat view, no redo, no model picker.** The harness and the model are chosen on the
+  command line and fixed for the run. `Ctrl+Z` undoes edits in the two editable panes; that
+  is the whole history surface, and it is capped.
 - **No guessing.** The harness is told to wrap the answer in `<<<TEXT>>>`/`<<<END>>>`
   markers. Missing markers are an error, not a preamble to strip.
 

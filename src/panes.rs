@@ -263,9 +263,9 @@ impl StreamState {
 
     /// Clears the output pane and opens a new run (spec §5 step 4).
     ///
-    /// The previous result is deliberately lost here: there is no undo (spec §2), and a
-    /// pane that kept the old answer next to a running rewrite would be ambiguous about which
-    /// one the run on screen is producing.
+    /// The previous result is deliberately lost here: undo (spec §4) reaches the two editable
+    /// buffers only, never this pane, and a pane that kept the old answer next to a running
+    /// rewrite would be ambiguous about which one the run on screen is producing.
     pub fn spawn(&mut self, at: Instant) {
         self.output.clear();
         self.pending_final = None;
@@ -679,8 +679,8 @@ mod tests {
         state.settle(&exited(0));
         assert_eq!(state.output_text(), "first answer");
 
-        // The next run must not show the previous answer beside a live rewrite (spec §2 has
-        // no undo, and §5 step 4 clears on spawn).
+        // The next run must not show the previous answer beside a live rewrite (§6.1b: the
+        // output pane is lost on spawn, and undo does not reach it).
         state.spawn(Instant::now());
         assert_eq!(
             state.output_text(),
