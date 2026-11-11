@@ -30,6 +30,7 @@ mod panes;
 mod process;
 mod rewrite;
 mod ui;
+mod undo;
 mod wrap;
 
 fn main() -> ExitCode {

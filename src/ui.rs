@@ -19,6 +19,7 @@ use crate::editor::Editor;
 use crate::layout::{self, Focus};
 use crate::panes::{Settled, StreamState};
 use crate::rewrite::{Machine, Refusal, Tick};
+use crate::undo::Undo;
 use crate::wrap::WrapState;
 
 /// Shown instead of quitting when the quit key arrives mid-rewrite (spec §4: "Quit; confirm
@@ -77,8 +78,10 @@ pub struct View<'a> {
     /// width the buffer deliberately does not know about.
     pub source: Editor,
     pub source_wrap: WrapState,
+    pub source_undo: Undo,
     pub instructions: Editor,
     pub instructions_wrap: WrapState,
+    pub instructions_undo: Undo,
     /// Content and scroll state of the output and debug panes (spec §5, §6.1b). Owned here
     /// rather than borrowed because the stream writes into it while the view is alive.
     pub stream: StreamState,
@@ -139,8 +142,10 @@ impl<'a> View<'a> {
             focus,
             source: Editor::from_text(&config.initial_source),
             source_wrap: WrapState::new(),
+            source_undo: Undo::new(),
             instructions: Editor::from_text(&config.initial_instructions),
             instructions_wrap: WrapState::new(),
+            instructions_undo: Undo::new(),
             stream: StreamState::new(),
             clipboard: Box::new(crate::clipboard::Disabled),
             toast: None,
@@ -232,7 +237,8 @@ impl<'a> View<'a> {
         // pane replaces what is there, so no whole-pane replace key is needed alongside it.
         // `Ctrl+C` is the copy key and is handled above with the other chords, because a run in
         // the debug pane gives it a second meaning. `Ctrl+K` clears, the one editing action a
-        // pane cannot do today without holding Backspace.
+        // pane cannot do today without holding Backspace. `Ctrl+Z` undoes the last edit in the
+        // focused editable pane (spec §4, §9), which is what makes the two destructive ones safe.
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
                 KeyCode::Char('v') => {
@@ -241,6 +247,10 @@ impl<'a> View<'a> {
                 }
                 KeyCode::Char('k') => {
                     self.clear();
+                    return Outcome::Continue;
+                }
+                KeyCode::Char('z') => {
+                    self.undo();
                     return Outcome::Continue;
                 }
                 KeyCode::Char('r') => {
@@ -262,13 +272,16 @@ impl<'a> View<'a> {
         if self.focus.is_editable() && !key.modifiers.contains(KeyModifiers::CONTROL) {
             // The width the wrap layer needs is the one the last draw used, which is why every
             // text operation takes `width` from the cached viewport rather than guessing.
-            if let Some((editor, wrap)) = self.editable(self.focus) {
+            if let Some((editor, wrap, undo)) = self.editable(self.focus) {
                 let width = wrap.viewport_width();
+                // Every arm that edits goes through `Undo::edit`, so one key event is one undo
+                // step. The movement arms deliberately do not: a cursor move changes no text, so
+                // recording it would spend a press on undoing an arrow key.
                 match key.code {
-                    KeyCode::Char(c) => editor.insert_char(c),
-                    KeyCode::Enter => editor.insert_newline(),
-                    KeyCode::Backspace => editor.backspace(),
-                    KeyCode::Delete => editor.delete(),
+                    KeyCode::Char(c) => undo.edit(editor, |editor| editor.insert_char(c)),
+                    KeyCode::Enter => undo.edit(editor, |editor| editor.insert_newline()),
+                    KeyCode::Backspace => undo.edit(editor, |editor| editor.backspace()),
+                    KeyCode::Delete => undo.edit(editor, |editor| editor.delete()),
                     // Up/Down move by *visual* row (spec §4): a wrapped line is several rows,
                     // and stepping by logical line would make Down skip content.
                     KeyCode::Up => wrap.move_up(editor, width),
@@ -510,8 +523,10 @@ impl<'a> View<'a> {
                 // `insert_str` routes newlines to `insert_newline`, so pasted prose lands as
                 // real lines rather than one long row. Invalid UTF-8 was already made lossy
                 // when the clipboard was read.
-                if let Some((editor, _)) = self.editable(self.focus) {
-                    editor.insert_str(&text);
+                // One call, so a paste is one undo step: a single `Ctrl+Z` takes the whole block
+                // back out.
+                if let Some((editor, _, undo)) = self.editable(self.focus) {
+                    undo.edit(editor, |editor| editor.insert_str(&text));
                 }
                 self.message = None;
             }
@@ -536,13 +551,37 @@ impl<'a> View<'a> {
             self.toast = Some(toast);
             return;
         }
-        if let Some((editor, _)) = self.editable(self.focus) {
-            editor.clear();
+        if let Some((editor, _, undo)) = self.editable(self.focus) {
+            undo.edit(editor, |editor| editor.clear());
         }
         self.message = Some(format!("cleared {}", self.focus.title()));
     }
 
-    /// The editable-panes-only guard behind `Ctrl+V` and `Ctrl+K` (spec §4).
+    /// `Ctrl+Z`: put the focused editable pane back to its previous state, text and cursor
+    /// together (spec §4, §9).
+    ///
+    /// One press per recorded step. An empty history is a silent no-op rather than a note: the
+    /// key has done all it can, and there is nothing true to add that the user does not already
+    /// see. The view follows the restored cursor because an undo can land far up the buffer, and
+    /// a cursor that is off screen would make the key look broken.
+    fn undo(&mut self) {
+        if let Err(toast) = self.require_editable() {
+            self.toast = Some(toast);
+            return;
+        }
+        let Some((editor, wrap, undo)) = self.editable(self.focus) else {
+            return;
+        };
+        let Some(step) = undo.undo() else {
+            return;
+        };
+        step.restore(editor);
+        let width = wrap.viewport_width();
+        wrap.scroll_to_cursor(editor, width, wrap.viewport_height());
+        self.message = None;
+    }
+
+    /// The editable-panes-only guard behind `Ctrl+V`, `Ctrl+K` and `Ctrl+Z` (spec §4).
     ///
     /// One helper rather than two copies of the test, so the two keys cannot drift into
     /// disagreeing about which panes they work in. Returns the toast to show when the key was
@@ -576,15 +615,26 @@ impl<'a> View<'a> {
         }
     }
 
-    /// The editor and wrap state of one editable pane, mutably.
+    /// The editor, wrap state and undo history of one editable pane, mutably.
     ///
-    /// A pair rather than a merged type: the buffer is logical and width-free, the wrap state
-    /// is visual and width-dependent, and every operation that moves the cursor needs both.
-    /// `None` for the read-only panes, which have neither.
-    fn editable(&mut self, focus: Focus) -> Option<(&mut Editor, &mut WrapState)> {
+    /// A triple rather than a merged type: the buffer is logical and width-free, the wrap state
+    /// is visual and width-dependent, and the history is a stack of past buffer states that the
+    /// buffer deliberately does not own (spec §9). Every operation that edits needs all three —
+    /// the edit, the follow-up scroll, and the step to record — which is why they travel together
+    /// rather than as three lookups that could drift apart.
+    /// `None` for the read-only panes, which have none of them.
+    fn editable(&mut self, focus: Focus) -> Option<(&mut Editor, &mut WrapState, &mut Undo)> {
         match focus {
-            Focus::Source => Some((&mut self.source, &mut self.source_wrap)),
-            Focus::Instructions => Some((&mut self.instructions, &mut self.instructions_wrap)),
+            Focus::Source => Some((
+                &mut self.source,
+                &mut self.source_wrap,
+                &mut self.source_undo,
+            )),
+            Focus::Instructions => Some((
+                &mut self.instructions,
+                &mut self.instructions_wrap,
+                &mut self.instructions_undo,
+            )),
             Focus::Output | Focus::Debug => None,
         }
     }
@@ -640,7 +690,7 @@ fn draw_toast(frame: &mut Frame, text: &str, area: Rect) {
 /// table, because this list is that table's only on-screen copy: a binding that is added there
 /// and forgotten here would be invisible to the user. The arrows are the spec's own glyphs, and
 /// they are also the widest cell in the column.
-const HELP_ROWS: [(&str, &str); 13] = [
+const HELP_ROWS: [(&str, &str); 14] = [
     ("Ctrl+R", "rewrite, or resend into the same session"),
     (
         "Ctrl+N",
@@ -660,6 +710,10 @@ const HELP_ROWS: [(&str, &str); 13] = [
     ("Shift+arrows", "same as Ctrl+arrows"),
     ("Ctrl+V", "paste into an editable pane"),
     ("Ctrl+K", "clear the focused editable pane"),
+    (
+        "Ctrl+Z",
+        "undo the last edit in the focused editable pane; no redo",
+    ),
     ("arrows", "move the cursor, or scroll"),
     ("PgUp / PgDn", "scroll by a page"),
     ("F1 / any key", "close this panel"),
@@ -749,7 +803,7 @@ fn draw_pane(frame: &mut Frame, view: &mut View, panes: &layout::Panes, focus: F
         // The editor's own wrap layer draws the pane, so the buffer is never reflowed and the
         // cursor is the terminal's rather than a glyph appended to the text. Only the focused
         // pane shows a cursor, which is why the unfocused one is drawn without setting it.
-        Some((editor, wrap)) => {
+        Some((editor, wrap, _)) => {
             // Only the focused pane owns the cursor: the last `set_cursor_position` of a draw
             // wins, so an unfocused pane placing one would steal it. The panel takes it too,
             // or it would blink over the panel text.
@@ -2342,6 +2396,223 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ctrl_z_undoes_typed_chars_one_step_per_key() {
+        for focus in [Focus::Source, Focus::Instructions] {
+            let mut view = editing_view(focus, "");
+            for c in ['a', 'b', 'c'] {
+                view.handle_key(&press_char(c));
+            }
+            assert_eq!(pane_text(&view, focus), "abc", "{focus:?} did not type");
+
+            for expected in ["ab", "a", ""] {
+                view.handle_key(&ctrl_char('z'));
+                assert_eq!(pane_text(&view, focus), expected, "{focus:?} undid once");
+            }
+
+            // At the bottom the key is a no-op: no panic, and the pane stays empty.
+            view.handle_key(&ctrl_char('z'));
+            assert_eq!(
+                pane_text(&view, focus),
+                "",
+                "{focus:?} undid past the start"
+            );
+            assert_eq!(pane_cursor(&view, focus), crate::editor::Cursor::new(0, 0));
+        }
+    }
+
+    #[test]
+    fn ctrl_z_restores_the_text_and_the_cursor_together() {
+        let mut view = editing_view(Focus::Source, "ab");
+        for _ in 0..2 {
+            view.handle_key(&press_char('c'));
+        }
+        assert_eq!(view.source.text(), "abcc");
+
+        view.handle_key(&ctrl_char('z'));
+
+        assert_eq!(view.source.text(), "abc");
+        // The cursor comes back to where the undone edit left it, not to the end of the text:
+        // the state being restored is the pair.
+        assert_eq!(view.source.cursor(), crate::editor::Cursor::new(0, 3));
+    }
+
+    #[test]
+    fn ctrl_v_of_a_paragraph_is_one_step_that_restores_bytes_and_cursor() {
+        let mut view = clipboard_view(
+            Focus::Source,
+            crate::clipboard::Recording::with("one\ntwo\nthree"),
+        );
+        view.source = Editor::from_text("start|end");
+        view.source.set_cursor(0, 6);
+        let before_text = view.source.text();
+        let before_cursor = view.source.cursor();
+
+        view.handle_key(&ctrl_char('v'));
+        assert_eq!(view.source.text(), "start|one\ntwo\nthreeend");
+
+        // Exactly one press takes the whole block back out, byte for byte.
+        view.handle_key(&ctrl_char('z'));
+        assert_eq!(
+            view.source.text(),
+            before_text,
+            "one press left part of the paste"
+        );
+        assert_eq!(
+            view.source.cursor(),
+            before_cursor,
+            "the cursor was not restored"
+        );
+    }
+
+    #[test]
+    fn ctrl_k_is_one_step_that_restores_the_whole_previous_buffer() {
+        for focus in [Focus::Source, Focus::Instructions] {
+            let mut view = editing_view(focus, "");
+            view.source = Editor::from_text("source\ntext");
+            view.instructions = Editor::from_text("instructions\ntext");
+            view.source.set_cursor(0, 3);
+            view.instructions.set_cursor(1, 2);
+            let before_text = pane_text(&view, focus);
+            let before_cursor = pane_cursor(&view, focus);
+
+            view.handle_key(&ctrl_char('k'));
+            assert_eq!(pane_text(&view, focus), "", "{focus:?} was not cleared");
+
+            view.handle_key(&ctrl_char('z'));
+            assert_eq!(
+                pane_text(&view, focus),
+                before_text,
+                "{focus:?} was not restored"
+            );
+            assert_eq!(pane_cursor(&view, focus), before_cursor);
+        }
+    }
+
+    #[test]
+    fn ctrl_z_in_a_read_only_pane_is_refused_with_a_toast() {
+        for focus in [Focus::Output, Focus::Debug] {
+            let mut view = editing_view(focus, "source text");
+            // A step in the editable pane proves the refusal is the read-only guard and not an
+            // empty history: undoing from here would have changed the source otherwise.
+            view.handle_key(&press_char('!'));
+            let before_output = view.stream.output_text();
+            let before_debug = view.stream.debug_text();
+
+            view.handle_key(&ctrl_char('z'));
+
+            let toast = view.toast.as_deref().expect("no refusal shown");
+            assert!(
+                toast.contains("read-only"),
+                "the toast should say why: {toast}"
+            );
+            assert_eq!(view.focus, focus, "the refusal moved focus");
+            assert_eq!(view.stream.output_text(), before_output);
+            assert_eq!(view.stream.debug_text(), before_debug);
+        }
+    }
+
+    #[test]
+    fn no_op_edits_record_no_step_to_undo() {
+        for focus in [Focus::Source, Focus::Instructions] {
+            // The first press after loading, with the cursor where the load left it: "ab" puts
+            // it at the end, so Delete has nothing to take.
+            let mut view = editing_view(focus, "ab");
+            view.handle_key(&KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+            view.handle_key(&ctrl_char('z'));
+            assert_eq!(pane_text(&view, focus), "ab", "{focus:?} undid a no-op");
+
+            // And a run of them: a history that recorded unconditionally would spend the one
+            // real step on a press that changed nothing.
+            view.handle_key(&press_char('!'));
+            assert_eq!(pane_text(&view, focus), "ab!");
+            for _ in 0..5 {
+                view.handle_key(&KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+            }
+            view.handle_key(&ctrl_char('z'));
+            assert_eq!(
+                pane_text(&view, focus),
+                "ab",
+                "{focus:?} lost the real step"
+            );
+        }
+    }
+
+    #[test]
+    fn undoing_in_one_pane_leaves_the_other_untouched() {
+        let mut view = editing_view(Focus::Source, "");
+        view.source = Editor::from_text("source");
+        view.instructions = Editor::from_text("instructions");
+        // One step in each pane, then undo only one of them.
+        view.handle_key(&press_char('!'));
+        view.handle_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(view.focus, Focus::Instructions);
+        view.handle_key(&press_char('?'));
+
+        view.handle_key(&ctrl_char('z'));
+
+        assert_eq!(view.instructions.text(), "instructions", "the undo missed");
+        assert_eq!(view.source.text(), "source!", "the undo crossed panes");
+        assert_eq!(view.source.cursor(), crate::editor::Cursor::new(0, 7));
+    }
+
+    #[test]
+    fn an_undo_brings_a_cursor_far_down_the_buffer_back_on_screen() {
+        // A buffer taller than the 80x24 window, so the restored cursor can be off screen.
+        let text = (0..60)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut view = editing_view(Focus::Source, &text);
+        let _ = draw_at(&mut view, 80, 24);
+
+        // The edit is made at the very end, so the step it records holds a cursor far down the
+        // buffer; the cursor then walks to the top, which records nothing.
+        view.handle_key(&press_char('!'));
+        assert_eq!(view.source.cursor(), crate::editor::Cursor::new(59, 8));
+        for _ in 0..60 {
+            view.handle_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+        let _ = draw_at(&mut view, 80, 24);
+        assert_eq!(view.source.cursor().line(), 0, "the cursor did not walk up");
+        let (_, wrap, _) = view.editable(Focus::Source).unwrap();
+        assert_eq!(wrap.scroll(), 0, "the pane did not scroll to the top");
+
+        view.handle_key(&ctrl_char('z'));
+
+        assert_eq!(
+            view.source.cursor().line(),
+            59,
+            "the cursor was not restored"
+        );
+        // The window followed the cursor rather than leaving it off screen, which is what
+        // `scroll_to_cursor` at the end of the undo arm buys.
+        let (_, wrap, _) = view.editable(Focus::Source).unwrap();
+        let scroll = wrap.scroll();
+        assert!(scroll > 0, "the view stayed at the top after the undo");
+        assert!(
+            cursor_from_view(&view, 80, 24).is_some(),
+            "the restored cursor is off screen at scroll {scroll}"
+        );
+    }
+
+    /// The text of one editable pane, so a per-focus test loops over both without matching.
+    fn pane_text(view: &View, focus: Focus) -> String {
+        match focus {
+            Focus::Source => view.source.text(),
+            Focus::Instructions => view.instructions.text(),
+            Focus::Output | Focus::Debug => panic!("{focus:?} has no editor"),
+        }
+    }
+
+    fn pane_cursor(view: &View, focus: Focus) -> crate::editor::Cursor {
+        match focus {
+            Focus::Source => view.source.cursor(),
+            Focus::Instructions => view.instructions.cursor(),
+            Focus::Output | Focus::Debug => panic!("{focus:?} has no cursor"),
+        }
+    }
+
     /// A view whose pane is scrolled away from the top, so clearing it leaves a wrapped-offset
     /// behind that the next draw has to survive.
     fn scrolled_view(focus: Focus) -> View<'static> {
@@ -2350,7 +2621,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let mut view = editing_view(focus, &text);
-        let (editor, wrap) = view.editable(focus).expect("an editable pane");
+        let (editor, wrap, _) = view.editable(focus).expect("an editable pane");
         // The width of the priming draw, so the rows the moves use are the rows that are on
         // screen. A draw always precedes a key, which is how the pane learns its width at all.
         let width = wrap.viewport_width();
@@ -2374,7 +2645,10 @@ mod tests {
 
             // The offset really is stale at this point, which is what the rest of the test
             // exists to survive.
-            let stale = view.editable(focus).map(|(_, wrap)| wrap.scroll()).unwrap();
+            let stale = view
+                .editable(focus)
+                .map(|(_, wrap, _)| wrap.scroll())
+                .unwrap();
             assert!(
                 stale > 0,
                 "the clear reset the offset, so nothing is being tested"
@@ -2393,7 +2667,7 @@ mod tests {
             let _ = draw_at(&mut view, 80, 1);
             let _ = draw_at(&mut view, 80, 24);
 
-            let (editor, wrap) = view.editable(focus).unwrap();
+            let (editor, wrap, _) = view.editable(focus).unwrap();
             assert_eq!(editor.text(), "", "{focus:?} was not cleared");
             assert_eq!(wrap.scroll(), 0, "{focus:?} kept the old scroll offset");
         }
