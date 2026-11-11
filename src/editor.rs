@@ -13,7 +13,14 @@
 //! There is no selection and no history inside this type (spec §2), and no key handling: the
 //! cursor is a model, so every operation is directly testable without a terminal. Undo is a
 //! snapshot stack kept per pane by the caller (§9), which is why this type has to keep one
-//! step equal to one public call: no public method here may call another one.
+//! step equal to one public call: no public method here may call another one. The one public
+//! call's internal steps are composed inside a private primitive instead ([`Editor::insert_one`]).
+//!
+//! The rule that follows from that, and binds the code that will add the history: the private
+//! primitives never record a snapshot. A public op that composes others must take its own
+//! snapshot at entry rather than delegating to two recording publics — otherwise a paste is one
+//! undo step per char, and a snapshot sitting in a primitive runs mid-operation, on a buffer
+//! that is nobody's resting state.
 
 /// A position in the buffer: a line index and a char index within that line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -104,13 +111,41 @@ impl Editor {
 
     /// Char length of `line`; 0 for an out-of-range index, which is the value the clamping
     /// arithmetic wants and so avoids a second bounds check at every call site.
-    pub fn line_len(&self, line: usize) -> usize {
+    ///
+    /// Private because every other method here uses it: left public, each of them would be a
+    /// public method calling a public method, and a reader that records nothing is still an
+    /// edge in the call graph the undo step rule has to reason about (spec §9).
+    fn line_len(&self, line: usize) -> usize {
         self.lines.get(line).map_or(0, |text| text.chars().count())
     }
 
-    /// Inserts one char at the cursor and moves the cursor past it. A newline is routed to
-    /// [`Editor::insert_newline`] so a caller streaming chars needs no special case.
+    /// Inserts one char at the cursor and moves the cursor past it. A newline becomes a line
+    /// break, so a caller streaming chars needs no special case.
     pub fn insert_char(&mut self, c: char) {
+        self.insert_one(c);
+    }
+
+    /// Inserts a whole `&str` at the cursor.
+    ///
+    /// Newlines inside it are real line breaks, not literal characters: a pane cannot display
+    /// one, and pasted prose arrives with them. The cursor ends after the last inserted char.
+    ///
+    /// The char loop stays here rather than delegating: one public call is one undo step, so a
+    /// paste has to reach the recording boundary once, not once per char.
+    pub fn insert_str(&mut self, text: &str) {
+        for c in text.chars() {
+            self.insert_one(c);
+        }
+    }
+
+    /// The one place a char lands in a line, and the only place `\n` is routed to
+    /// [`Editor::insert_newline`].
+    ///
+    /// Private on purpose: the routing rule lives here so [`Editor::insert_char`] and
+    /// [`Editor::insert_str`] cannot grow two disagreeing copies of it, and because a public
+    /// funnel that other public methods called would make one user action record several undo
+    /// steps (spec §9). A snapshot must never be taken here — see the module doc.
+    fn insert_one(&mut self, c: char) {
         if c == '\n' {
             self.insert_newline();
             return;
@@ -121,16 +156,6 @@ impl Editor {
         self.cursor = Cursor::new(line, self.cursor.column() + 1);
     }
 
-    /// Inserts a whole `&str` at the cursor.
-    ///
-    /// Newlines inside it are real line breaks, not literal characters: a pane cannot display
-    /// one, and pasted prose arrives with them. The cursor ends after the last inserted char.
-    pub fn insert_str(&mut self, text: &str) {
-        for c in text.chars() {
-            self.insert_char(c);
-        }
-    }
-
     /// Splits the current line at the cursor and puts the cursor at the start of the new line,
     /// so the text after the cursor moves down with it.
     pub fn insert_newline(&mut self) {
@@ -139,6 +164,20 @@ impl Editor {
         let tail = self.lines[line].split_off(at);
         self.lines.insert(line + 1, tail);
         self.cursor = Cursor::new(line + 1, 0);
+    }
+
+    /// Empties the buffer: one empty line, cursor at the origin.
+    ///
+    /// `Ctrl+K` needs this instead of replacing the editor with [`Editor::new`], because the
+    /// two invariants above are this type's to keep, and because a cleared buffer has to be one
+    /// edit like any other once undo records at the public boundary (spec §4).
+    pub fn clear(&mut self) {
+        // `truncate(1)` cannot empty the vector — `lines` is never empty — so the indexing
+        // below is safe and the one-empty-line invariant holds by construction rather than by
+        // a follow-up push.
+        self.lines.truncate(1);
+        self.lines[0].clear();
+        self.cursor = Cursor::default();
     }
 
     /// Removes the char before the cursor, or joins the current line onto the previous one at
@@ -484,6 +523,45 @@ mod tests {
         assert_eq!(editor.text(), "ab\n");
         assert_eq!(editor.line_count(), 2);
         assert_at(&editor, 1, 0);
+    }
+
+    #[test]
+    fn clear_empties_a_multi_line_buffer_to_one_line_at_the_origin() {
+        let mut editor = at("first\nsecond\nthird", 1, 4);
+
+        editor.clear();
+
+        assert_eq!(editor.text(), "");
+        assert_eq!(editor.lines(), [""]);
+        assert_eq!(editor.line_count(), 1);
+        assert_at(&editor, 0, 0);
+    }
+
+    #[test]
+    fn clear_on_an_empty_buffer_is_idempotent() {
+        let mut editor = Editor::new();
+
+        // Repeated, so a clear that only worked on a populated buffer shows up as a panic or a
+        // second empty line on the later pass.
+        for _ in 0..3 {
+            editor.clear();
+            assert_eq!(editor.text(), "");
+            assert_eq!(editor.line_count(), 1);
+            assert_at(&editor, 0, 0);
+        }
+    }
+
+    #[test]
+    fn a_cleared_buffer_is_editable_and_reads_back_as_an_empty_document() {
+        let mut editor = at("—é🙂\ntail", 0, 2);
+        editor.clear();
+
+        // The invariants are what a cleared buffer has to keep: an insert must land at the
+        // origin, and a reload must agree that the buffer is empty.
+        editor.insert_char('x');
+        assert_eq!(editor.text(), "x");
+        assert_at(&editor, 0, 1);
+        assert_eq!(Editor::from_text(&editor.text()).line_count(), 1);
     }
 
     #[test]

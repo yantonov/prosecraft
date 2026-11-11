@@ -527,14 +527,17 @@ impl<'a> View<'a> {
     /// (spec §4) is the recovery the user has, which is why the clear goes through the editor
     /// method rather than replacing the value: a cleared buffer is one undo step like any
     /// other edit.
+    ///
+    /// The wrap state is deliberately left alone. Its offset is stale the moment the buffer
+    /// shrinks, but `WrapState::scroll_to_cursor` clamps it on the next draw, so resetting it
+    /// here would be a second owner for state the wrap layer already repairs.
     fn clear(&mut self) {
         if let Err(toast) = self.require_editable() {
             self.toast = Some(toast);
             return;
         }
-        if let Some((editor, wrap)) = self.editable(self.focus) {
-            *editor = Editor::new();
-            *wrap = WrapState::new();
+        if let Some((editor, _)) = self.editable(self.focus) {
+            editor.clear();
         }
         self.message = Some(format!("cleared {}", self.focus.title()));
     }
@@ -2336,6 +2339,63 @@ mod tests {
             );
             assert!(!kept.text().is_empty(), "{focus:?} cleared its neighbour");
             assert_eq!(view.focus, focus, "the clear moved focus");
+        }
+    }
+
+    /// A view whose pane is scrolled away from the top, so clearing it leaves a wrapped-offset
+    /// behind that the next draw has to survive.
+    fn scrolled_view(focus: Focus) -> View<'static> {
+        let text = (0..60)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut view = editing_view(focus, &text);
+        let (editor, wrap) = view.editable(focus).expect("an editable pane");
+        // The width of the priming draw, so the rows the moves use are the rows that are on
+        // screen. A draw always precedes a key, which is how the pane learns its width at all.
+        let width = wrap.viewport_width();
+        assert!(width > 0, "the view was drawn with no width");
+        for _ in 0..40 {
+            wrap.move_down(editor, width);
+        }
+        assert!(
+            wrap.scroll() > 0,
+            "the pane did not scroll, so the test proves nothing"
+        );
+        view
+    }
+
+    #[test]
+    fn clearing_a_scrolled_pane_leaves_a_drawable_pane() {
+        for focus in [Focus::Source, Focus::Instructions] {
+            let mut view = scrolled_view(focus);
+
+            view.handle_key(&ctrl_char('k'));
+
+            // The offset really is stale at this point, which is what the rest of the test
+            // exists to survive.
+            let stale = view.editable(focus).map(|(_, wrap)| wrap.scroll()).unwrap();
+            assert!(
+                stale > 0,
+                "the clear reset the offset, so nothing is being tested"
+            );
+
+            // The draw is the assertion: a stale offset would either paint the wrong text or
+            // blow up in the wrap arithmetic. A zero-height window is drawn between the two
+            // full ones, because the offset has to survive a degenerate frame as well.
+            let buffer = draw_at(&mut view, 80, 24);
+            let panes = layout::panes(Rect::new(0, 0, 80, 24));
+            let inner = panes.inner(focus);
+            let drawn: String = (inner.x..inner.x + inner.width)
+                .map(|x| buffer[(x, inner.y)].symbol())
+                .collect();
+            assert_eq!(drawn.trim(), "", "{focus:?} drew stale text after a clear");
+            let _ = draw_at(&mut view, 80, 1);
+            let _ = draw_at(&mut view, 80, 24);
+
+            let (editor, wrap) = view.editable(focus).unwrap();
+            assert_eq!(editor.text(), "", "{focus:?} was not cleared");
+            assert_eq!(wrap.scroll(), 0, "{focus:?} kept the old scroll offset");
         }
     }
 
