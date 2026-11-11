@@ -227,6 +227,11 @@ const BURST_GRACE: Duration = Duration::from_millis(10);
 /// once a burst is established. The run ends at the first event it does not consume, which is
 /// returned so the caller can handle it on the next pass.
 ///
+/// A `Release` event is skipped rather than treated as the end of the run. Windows reports a
+/// press and a release for every keystroke, so a pasted run arrives as `Press, Release, Press,
+/// Release, …`; ending at the first release would cut every run to one char, which is exactly
+/// the bug that made a paste undo one char at a time.
+///
 /// Returns the text, how many chars it holds, and the event that ended the run.
 fn collect_text_run(
     first: KeyEvent,
@@ -241,13 +246,19 @@ fn collect_text_run(
     }
     loop {
         match next(count)? {
-            Some(Event::Key(key)) => match typed_char(&key) {
-                Some(c) => {
-                    text.push(c);
-                    count += 1;
+            Some(Event::Key(key)) => {
+                if key.kind == KeyEventKind::Release {
+                    // The release half of a press already counted: not text, and not the end.
+                    continue;
                 }
-                None => return Ok((text, count, Some(Event::Key(key)))),
-            },
+                match typed_char(&key) {
+                    Some(c) => {
+                        text.push(c);
+                        count += 1;
+                    }
+                    None => return Ok((text, count, Some(Event::Key(key)))),
+                }
+            }
             Some(other) => return Ok((text, count, Some(other))),
             None => return Ok((text, count, None)),
         }
@@ -393,6 +404,34 @@ mod tests {
     fn run_of(first: KeyEvent, script: Vec<KeyEvent>) -> (String, usize, Option<Event>) {
         let mut script = script.into_iter().map(Event::Key);
         collect_text_run(first, |_| Ok(script.next())).expect("the collector failed")
+    }
+
+    /// A release event, which Windows emits for every press.
+    fn released(c: char) -> KeyEvent {
+        KeyEvent::new_with_kind(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Release)
+    }
+
+    #[test]
+    fn a_windows_burst_press_release_pairs_is_one_string() {
+        // The shape Windows actually delivers: a press and a release for every char, so the run
+        // is Press, Release, Press, Release, ... Ending at the first release cut every run to
+        // one char and left the paste undoing one character at a time.
+        let (text, count, ended_by) = run_of(
+            typed('h'),
+            vec![
+                released('h'),
+                typed('e'),
+                released('e'),
+                typed('l'),
+                released('l'),
+                typed('o'),
+                released('o'),
+            ],
+        );
+
+        assert_eq!(text, "helo", "a release event cut the run short");
+        assert_eq!(count, 4, "the run counted the wrong number of chars");
+        assert!(ended_by.is_none(), "the run ended early: {ended_by:?}");
     }
 
     #[test]
