@@ -337,7 +337,8 @@ impl<'a> View<'a> {
     /// scrollers. Every other key is ignored, so an unhandled key does nothing rather than
     /// something surprising.
     ///
-    /// Esc is in the fall-through arm on purpose: spec §4 fixes it as "does nothing in v0.1",
+    /// Esc is in the fall-through arm on purpose: spec §4 fixes it as "does nothing" outside
+    /// the help panel,
     /// and a key that silently starts doing something later is harder to notice than a test.
     fn route_focus(&mut self, key: &KeyEvent) -> Outcome {
         self.focus = match (key.code, key.modifiers) {

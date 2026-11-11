@@ -1,40 +1,41 @@
-# prosecraft — spec (draft v0.9)
+# prosecraft — spec
 
 A TUI that rewrites text with an LLM harness. Paste text on the left, set instructions for
 how to rewrite, press one key, read the result on the right. Change the text or the
 instructions and press the same key again.
 
-Status: draft. Sections marked **[Q]** are unresolved, see [Open questions](#open-questions).
+Status: implemented for `claude`, `pi` and `codex`. Each statement below states a decision,
+the measurement behind it, or a manual check (§10).
 
 ## 1. Goal
 
 Rewrite a block of text with a mandatory, externally installed harness (`claude`, `pi`, or
-`codex`) run in one-shot (non-interactive) mode. Iterate by editing the instructions, or the source
-text, and pressing the same key again — the harness session carries the conversation
-history forward.
+`codex`) in one-shot, non-interactive mode. To iterate, edit the instructions or the source
+text and press the same key again. The harness session carries the conversation history
+forward.
 
-### Non-goals (v0.1)
+### Non-goals
 
-- Editing history and redo. Undo of the two editable buffers is in scope (§4).
-- Multi-turn chat with the model, or any conversation view.
-- **Any filesystem or side effect on the system.** The app shows text and talks to the
-  harness. It reads the clipboard, writes the clipboard, and nothing else. Harness tool
-  use is disabled, not merely discouraged. (codex cannot be denied its tools and is
-  sandboxed instead — measured, §6.5; a human accepted the weaker guarantee. The intent
-  above is unchanged: no run may reach the filesystem.)
-- Persisting anything across runs: no state file, no config file, no session pointer
-  beyond what the harness itself stores.
+- Edit history and redo. Undo covers the two editable buffers only (§4).
+- Multi-turn chat, or a conversation view.
+- **A filesystem side effect of any kind.** The app shows text and talks to the harness. It
+  reads the clipboard, writes the clipboard, and does nothing else. Harness tool use is
+  disabled. (A tool denial is not possible on codex, so codex runs in a sandbox instead —
+  measured, §6.5. A human accepted the weaker guarantee. The intent stands: no run reaches
+  the filesystem.)
+- Persistence across runs: no state file, no config file, no session pointer beyond what the
+  harness itself stores.
 
 ## 2. Assumptions
 
-1. The harness binary is installed and authenticated by the user. prosecraft does not
-   manage credentials, models, or provider config.
-2. "Instructions" (the system prompt) are the user's *task instruction* for this rewrite:
-   "rewrite in a formal register", "make it shorter", "use slang". They are valid only for
-   the current run. No persistence, no global config, no profile management.
-3. A rewrite is refused while the instructions are empty. This is the required validation.
-4. Only one harness process runs at a time.
-5. Linux/macOS first; Windows best-effort.
+1. The user installed and authenticated the harness binary. prosecraft manages no
+   credentials, models, or provider config.
+2. "Instructions" (the instructions pane) are the user's *task instruction* for this
+   rewrite: "rewrite in a formal register", "make it shorter", "use slang". They apply to
+   the current run only. There is no persistence, no global config, no profile management.
+3. The app must refuse a rewrite while the instructions are empty.
+4. One harness process runs at a time.
+5. Linux and macOS first. Windows is best-effort.
 
 ## 3. CLI
 
@@ -54,18 +55,18 @@ prosecraft [OPTIONS]
 
 Rules:
 
-- `--harness` is mandatory. Unknown value → exit code 2 with usage.
-- Harness and model are chosen **once, on the command line**, and cannot be changed from
-  the UI. Switching harness means restarting the app.
-- `--prompt` and `--prompt-file` are mutually exclusive → exit code 2. Both are read once
-  at startup into the instructions pane; the file is **never** re-read. To pick up edits to
-  the file, restart the app. There is no reload hotkey.
-- Source text precedence: `--text` / `--text-file` > clipboard > empty.
-- **The harness binary must resolve on `PATH` at startup.** If it does not, print a clear
-  one-line error naming the expected binary to **stderr** and exit non-zero, before the
-  terminal is put into raw mode and before any UI is drawn. An app whose only job is to
-  spawn a process should not open a window it cannot use. `--help` and `--version` still
-  work without any harness installed, since they return before this check.
+- `--harness` is mandatory. An unknown value exits with code 2 and prints usage.
+- The user chooses the harness and the model **once, on the command line**. The UI cannot
+  change them. A switch of harness means a restart.
+- `--prompt` and `--prompt-file` are mutually exclusive and exit with code 2. The app reads
+  the value once at startup, into the instructions pane, and never re-reads the file. To
+  pick up an edit, restart the app. There is no reload hotkey.
+- Source text precedence: `--text` / `--text-file`, then clipboard, then empty.
+- **The harness binary must resolve on `PATH` at startup.** If it does not, the app prints
+  a one-line error that names the expected binary to **stderr**, then exits non-zero. This
+  happens before raw mode and before the first draw. An app whose only job is to spawn a
+  process does not open a window it cannot use. `--help` and `--version` work with no
+  harness installed, because they return before this check.
 
 ## 4. TUI
 
@@ -74,10 +75,10 @@ Rules:
 │                                ││                                │
 │  editable                      ││  read-only, rewritten text      │
 │                                ││                                │
-├ instructions ──────────────────┤├ process ───────────────────────┤
+├ instructions ──────────────────┤├ debug ─────────────────────────┤
 │ editable, ~8 lines             ││ read-only, stdout+stderr, ~8    │
 └────────────────────────────────┘└────────────────────────────────┘
- source │ prose… │ idle          [Ctrl+R] rewrite  [F1] help  [Ctrl+Q] quit
+ pi │ 9f1c4a2b │ idle          [Ctrl+R] rewrite  [F1] help  [Ctrl+Q] quit
 ```
 
 Four panes, all focusable. Two columns, 50/50.
@@ -89,52 +90,51 @@ Four panes, all focusable. Two columns, 50/50.
 | output | no | rewritten text from the last successful run |
 | debug | no | streamed text, reasoning, stderr, app events |
 
-- Focus is a single index over the four panes; `Tab` / `Shift+Tab` cycles forward and back
-  in reading order. `Ctrl+Left` / `Ctrl+Right` jump to the other column, preserving row;
-  `Ctrl+Up` / `Ctrl+Down` jump to the other row, preserving column, and do not wrap at the
-  edge. The same four moves are also bound to `Shift+Left` / `Shift+Right` and
-  `Shift+Up` / `Shift+Down`, so neighbouring panes are reachable without a hand on the
-  control key; the two bindings are aliases and never differ in behaviour.
-- A `Ctrl+R` that starts a rewrite sets focus to the `output` pane. Asking for a rewrite is
-  the end of typing: the next thing the user does is read the result, and the pane that will
-  hold it is where they are looking. The debug pane stays one `Ctrl+Up` away, which is what
-  keeps cancelling reachable. A refused `Ctrl+R` does not go here; it moves focus to the
-  culprit (§5).
+- Focus is one index over the four panes. `Tab` / `Shift+Tab` cycle forward and back in
+  reading order. `Ctrl+Left` / `Ctrl+Right` move to the other column and keep the row.
+  `Ctrl+Up` / `Ctrl+Down` move to the other row and keep the column, with no wrap at the
+  edge. `Shift+Left` / `Shift+Right` and `Shift+Up` / `Shift+Down` are aliases for the same
+  four moves, so a neighbouring pane is reachable without a hand on the control key. The
+  two bindings never differ in behaviour.
+- A `Ctrl+R` that starts a rewrite sets focus to the `output` pane. A rewrite request ends
+  typing: the next action is to read the result, so focus goes to the pane that will hold
+  it. The debug pane stays one `Ctrl+Up` away, which keeps cancel reachable. A refused
+  `Ctrl+R` moves focus to the culprit instead (§5).
 - The focused pane shows a cursor (editable) or a highlighted border (read-only), and
-  scrolls to keep the cursor/offset in view.
-- `output` and `debug` keep their own scroll offsets. The `debug` pane auto-tails while the
-  user has not scrolled up in it, and stops tailing once they have (a marker shows
-  "not tailing").
-- Every pane soft-wraps. Widths are recalculated on resize; text is never truncated.
-- Both bottom panes (`instructions`, `debug`) share one height: `min(8, column / 3)`,
-  minimum 3 lines, capped at 8. The same formula on equal-height columns puts their top
-  border on one row, so the two halves of the frame line up.
-- Status line: harness name, session id (short form, `—` before the first rewrite), state
-  (`idle` / `running` / `error`), then the key hints. The hints are `[Ctrl+R] rewrite`,
-  `[F1] help`, `[Ctrl+Q] quit` in that order; the rest of the key set is reachable only
-  from the help panel, because the row is one line that clips. `Tab` is not hinted: `F1`
-  is on the row, so the whole key table, focus cycling included, is one press away.
+  scrolls to keep the cursor or offset in view.
+- `output` and `debug` keep separate scroll offsets. The `debug` pane tails the stream until
+  the user scrolls up in it. After that it keeps its offset and shows a "not tailing"
+  marker.
+- Every pane soft-wraps. A resize recalculates the widths. No pane truncates text.
+- Both bottom panes (`instructions`, `debug`) share one height: `min(8, column / 3)`, with
+  a minimum of 3 lines and a cap of 8. The two columns have equal height, so this one
+  formula puts both top borders on one row.
+- Status line: harness name, session id, state (`idle` / `running` / `error`), then the key
+  hints. The session id shows `—` before the first rewrite and clips to the row width. The
+  hints are `[Ctrl+R] rewrite`, `[F1] help`, `[Ctrl+Q] quit`, in that order. The row is one
+  line, so it clips, and the help panel carries the rest of the key set. `Tab` has no hint,
+  because `F1` is on the row and the whole key table is one press away.
 
 ### Key bindings
 
 | Key | Action |
 |---|---|
-| `Ctrl+R` | Rewrite. Starts a session on first use, otherwise resends current source + instructions into the existing session |
-| `Ctrl+N` | New session: drop harness context, clear output and debug, keep source and instructions |
-| `Ctrl+C` | Copy the focused pane's text. In the debug pane while a rewrite runs: cancel the harness, after a confirming second press |
-| `Ctrl+Q` | Quit; confirm if a rewrite is running. The only quit key |
+| `Ctrl+R` | Rewrite. Starts a session on first use, or resends the current source and instructions into the existing session |
+| `Ctrl+N` | New session. Drops the harness context and clears output and debug. Keeps source and instructions |
+| `Ctrl+C` | Copy the focused pane's text. In the debug pane during a run: cancel the harness after a second press |
+| `Ctrl+Q` | Quit, with a second press during a run. The only quit key |
 | `Tab` / `Shift+Tab` | Cycle focus |
 | `Ctrl+←` / `Ctrl+→` | Switch column |
-| `Ctrl+↑` / `Ctrl+↓` | Switch row (source ↔ instructions, output ↔ debug); no wrap |
-| `Shift+←` / `Shift+→` | Switch column; same as `Ctrl+←` / `Ctrl+→` |
-| `Shift+↑` / `Shift+↓` | Switch row; same as `Ctrl+↑` / `Ctrl+↓` |
+| `Ctrl+↑` / `Ctrl+↓` | Switch row (source ↔ instructions, output ↔ debug). No wrap |
+| `Shift+←` / `Shift+→` | Switch column. Same as `Ctrl+←` / `Ctrl+→` |
+| `Shift+↑` / `Shift+↓` | Switch row. Same as `Ctrl+↑` / `Ctrl+↓` |
 | `Ctrl+V` | Paste the clipboard into the focused pane (editable panes only) |
 | `Ctrl+K` | Clear the focused pane (editable panes only) |
-| `Ctrl+Z` | Undo the last edit in the focused editable pane, one step per key event; refused with the read-only note in `output` and `debug`. Capped history, no redo |
+| `Ctrl+Z` | Undo the last edit in the focused editable pane, one step per key event. The app refuses in `output` and `debug` with the read-only note. Capped history, no redo |
 | arrow keys | Move cursor (editable) or scroll (read-only) |
 | `PgUp` / `PgDn` | Scroll by a page in the focused pane |
-| `F1` | Toggle the key-bindings help panel. Any key closes it; the key that closes it does nothing else |
-| `Esc` | Closes the help panel when it is open. Otherwise does nothing in v0.1 |
+| `F1` | Toggle the key-bindings help panel. Any key closes it, and that key does nothing else |
+| `Esc` | Close the help panel when it is open. Otherwise nothing |
 
 ## 5. Rewrite flow
 
@@ -149,45 +149,42 @@ idle ──Ctrl+R──> validating ──fail──> validation error (stays id
                       └──> cancelled
 ```
 
-1. **Validate.** Refuse, show the reason in the status line, and move focus to the
-   offending pane if:
-   - instructions are empty or whitespace-only (**required validation**);
-   - source text is empty or whitespace-only;
-   - the harness binary does not resolve on `PATH`;
-   - a rewrite is already running.
-2. **Send.** One invocation carries:
-   - instructions → **in the user turn**, in the fixed template (see §6.1). Not as a
-     harness system prompt — see §6.0, which is a measured constraint, not a preference;
-   - source text → also in the user turn, under the instructions;
-   - a trailing demand to wrap the answer in `<<<TEXT>>>`/`<<<END>>>` (§6.1).
+1. **Check.** Refuse, show the reason in the status line, and move focus to the offending
+   pane when:
+   - the instructions are empty or whitespace-only (**required check**)
+   - the source text is empty or whitespace-only
+   - the harness binary does not resolve on `PATH`
+   - a rewrite is already running
+2. **Send.** One invocation carries three parts:
+   - the instructions, **in the user turn**, in the fixed template (§6.1). The app does not
+     use a harness system prompt — see §6.0, a measured constraint and not a preference.
+   - the source text, also in the user turn, under the instructions
+   - a trailing demand to wrap the answer in `<<<TEXT>>>`/`<<<END>>>` (§6.1)
 
-   The source text is sent on **every** rewrite, changed or not. Editing the source and
-   pressing `Ctrl+R` again is the normal way to work; no source hashing and no automatic
-   session invalidation is needed. Texts are at most a few paragraphs, so resending is
-   cheap.
-3. **Session.** The session id is created lazily on the first `Ctrl+R` of the run and
-   reused for every subsequent rewrite. `Ctrl+N` discards it and starts a new one on the
-   next rewrite. One session per TUI run, always.
-4. **Stream.** The **output pane is reset on spawn** so the view says plainly that a new
-   action started. stdout is a **JSON event stream** (§6.1a); every event type is rendered
-   into the **debug pane** — streamed `text_delta`, reasoning deltas, stderr, app events —
-   so progress is visible for debugging even when the final text differs from what
-   streamed. The output pane gets **nothing** during the run.
-5. **Settle.** Exit 0 → put the harness's final text in the output pane, trim, state `idle`.
-   Non-zero exit, tool-call text, or unparseable output → state `error`, output pane stays
-   empty for this run, debug tail visible.
+   The app sends the source text on **every** rewrite, changed or not. To work, edit the
+   source and press `Ctrl+R` again. The app needs no source hashing and no automatic session
+   invalidation. A text is at most a few paragraphs, so a resend is cheap.
+3. **Session.** The app creates the session id lazily, on the first `Ctrl+R` of the run, and
+   reuses it for every later rewrite. `Ctrl+N` discards it, so the next rewrite starts a new
+   one. One session per TUI run, always.
+4. **Stream.** The app resets the **output pane on spawn**, so the view shows that a new
+   action started. stdout is a **JSON event stream** (§6.1a). The app renders every event
+   type into the **debug pane** — streamed `text_delta`, reasoning deltas, stderr, app
+   events — so progress stays visible even when the final text differs from the stream. The
+   output pane gets **nothing** during the run.
+5. **Settle.** Exit 0 sends the harness's final text to the output pane, trimmed, and the
+   state becomes `idle`. A non-zero exit, tool-call text, or unparseable output sets state
+   `error`, leaves the output pane empty for this run, and shows the debug tail.
 
-The instructions are re-read from the command line on every invocation and are also
-present in the user turn, so editing them always takes effect on the next rewrite.
+The app reads the instructions from the instructions pane on every invocation and sends them
+in the user turn, so an edit takes effect on the next rewrite.
 
-Note: every rewrite appends another copy of the source text to the harness history.
-`Ctrl+N` is the reset. No automatic compaction is implemented; harness-side compaction is
+Note: each rewrite appends another copy of the source text to the harness history. `Ctrl+N`
+is the reset. There is no automatic compaction, because compaction is the harness's business.
+With "a few paragraphs" as the expected input, this is no practical limit.
 
-the harness's business. With "a few paragraphs" as the expected input this is not a
-practical limit.
-
-Pressing `Ctrl+R` **or** `Ctrl+N` while a rewrite is running is ignored, and the status line
-says so. Resetting the session mid-run would discard the id the live process is using.
+The app ignores `Ctrl+R` **and** `Ctrl+N` while a rewrite runs, and the status line says so.
+A session reset mid-run would discard the id that the live process uses.
 
 ## 6. Harness adapters
 
@@ -198,80 +195,85 @@ struct Task<'a> {
     instructions: &'a str,
     source_text: &'a str,
     model: Option<&'a str>,
+    /// `None` is the first call of this run: there is no session to continue.
+    session: Option<&'a str>,
+    /// Where the prompt travels, as the resolution on this OS decided (§6).
+    transport: Transport,
 }
 
 struct Invocation {
     program: String,
     args: Vec<String>,
     stdin: Option<String>, // None => prompt passed as an argument
-                           // Some => prompt written to stdin (Windows batch shims only, §6)
+                           // Some => prompt written to stdin: a Windows batch shim (§6),
+                           // or codex, whose transport is stdin everywhere (§6.5)
 }
 
 trait Harness {
     fn name(&self) -> &str;
-    /// `Some` when the client names sessions; `None` when the harness names its own and
+    /// `Some` when the client names sessions. `None` when the harness names its own and
     /// reports the id on its event stream (codex, §6.5).
     fn new_session_id(&self) -> Option<String>;
-    /// `session == None` means this is the first call of the session.
-    fn build(&self, task: &Task, session: Option<&str>) -> Result<Invocation>;
-    /// Classify one stdout line for the debug pane. Never produces output text.
+    /// Builds the argv for one call. `task.session == None` is the first call of the run.
+    fn build(&self, task: &Task) -> Result<Invocation>;
+    /// Classifies one stdout line for the debug pane. Produces no output text.
     fn classify(&self, line: &str) -> Event;
-    /// Authoritative final text, if this line was the terminal event.
+    /// The authoritative final text, when this line is the terminal event.
     fn final_text(&self, line: &str) -> Option<String>;
-    /// The session id, if this line was the one that announced it. Default `None`: a
-    /// client-named harness has nothing to announce (§6.5).
+    /// The session id, when this line announced it. Default `None`: a client-named
+    /// harness has nothing to announce (§6.5).
     fn session_from_event(&self, line: &str) -> Option<String>;
 }
 ```
 
-`classify`/`final_text` are the streaming surface and the reason each adapter owns its own
-event vocabulary instead of the app parsing JSON generically. `Event` is a small enum
-(`Text`, `Think`, `Junk`), used only to label debug lines. A malformed or unrecognised line
-maps to `Junk` — never an error — so an unknown event type cannot abort a run.
+`classify` and `final_text` form the streaming surface. They are the reason each adapter
+owns its event vocabulary instead of the app parsing JSON generically. `Event` is a small
+enum (`Text`, `Think`, `Junk`) that labels debug lines only. A malformed or unrecognised
+line maps to `Junk`, never to an error, so an unknown event type cannot abort a run.
 
-The two session methods on the trait are two halves of one question: **who names the
-session.** claude and pi accept an id the client chose (`new_session_id` returns `Some`, and
-the id is read back out of the argv the adapter wrote it into); codex generates the id
-itself and reports it on the event stream, so `new_session_id` returns `None` and
-`session_from_event` learns it from `thread.started` (§6.5). One method cannot express both
-directions, and both defaults are safe, so there are two.
+The two session methods answer one question: **who names the session.** claude and pi accept
+an id that the client chose. For them `new_session_id` returns `Some`, and the app reads the
+id back out of the argv that the adapter wrote. codex generates its own id and reports it on
+the event stream, so `new_session_id` returns `None` and `session_from_event` learns the id
+from `thread.started` (§6.5). One method cannot express both directions, and both defaults
+are safe, so the trait has two.
 
-claude and pi take the prompt as an argument rather than stdin: prompts may contain
-`-` and quoting is one implementation instead of two.
+claude and pi take the prompt as an argument. A prompt may contain `-`, and one transport
+is one implementation instead of two.
 
-codex is the exception, and it is a property of the harness rather than of the platform, so
-it is stated per adapter: it takes the prompt on **stdin** everywhere (§6.5). The
-`Transport` in `Task` answers "does *this resolution on this OS* force stdin" — the Windows
-shim question below — and a codex adapter does not consult it at all, because its transport
-is fixed by which harness it is.
+codex is the exception. Its transport is a property of the harness and not of the platform,
+so §6.5 states it per adapter: codex takes the prompt on **stdin** everywhere. `Transport` in
+`Task` answers a different question — "does *this resolution on this OS* force stdin" (the
+Windows shim question below). A codex adapter ignores `Transport`, because its transport
+follows from which harness it is.
 
-**Windows exception, measured.** The `pi` installation on Windows is an npm shim: a
-`pi.cmd` batch file, with no `pi.exe`. A batch file's command line is re-parsed by
-`cmd.exe`, and no argument carrying a newline reaches it at all — measured against the real
-template, `spawn` fails with `InvalidInput: batch file arguments are invalid`, and going
-through `cmd /c` instead truncates the prompt at the first newline. Since the prompt
-template always contains newlines, argv cannot be the transport on that platform.
+**Windows exception, measured.** The `pi` installation on Windows is an npm shim: a `pi.cmd`
+batch file, with no `pi.exe`. `cmd.exe` re-parses the command line of a batch file and
+delivers no argument that carries a newline. Measured against the real template: `spawn`
+fails with `InvalidInput: batch file arguments are invalid`. A `cmd /c` route truncates the
+prompt at the first newline instead. The prompt template always contains newlines, so argv
+cannot be the transport on that platform.
 
-On stdin the same prompt round-trips verbatim through the shim (measured: one assistant
-`message_end`, `agent_end` shows every newline and both markers intact). So, **only when
-the resolved program is a Windows batch shim**, the prompt is written to stdin and no
-positional prompt or `--` separator is passed. On unix, on macOS, and for claude anywhere,
-the argv is unchanged and remains the transport. This is a per-platform rule, not a second
-transport: the adapter asks the resolution, and there is no other caller.
+On stdin the same prompt round-trips verbatim through the shim. Measured: one assistant
+`message_end`, and `agent_end` shows every newline and both markers intact. So the app
+writes the prompt to stdin, and passes no positional prompt and no `--` separator, **only
+when the resolved program is a Windows batch shim**. On unix, on macOS, and for claude
+anywhere, argv stays the transport. This is one per-platform rule, not a second transport:
+the resolution decides, and `Task` carries the answer.
 
-The same limit applies to `--system-prompt`, which carries the instructions pane and
-therefore the same free text: measured, a newline there also fails with `InvalidInput`.
-That flag is dropped on a shim, which costs nothing because §6.0 already establishes that
-it is passed for register only and correctness never depends on it — the instructions
-travel in the user turn, which on a shim means the stdin prompt.
+`--system-prompt` carries the instructions pane, and therefore the same free text, so the
+same limit applies: measured, a newline in its value also fails with `InvalidInput`. The
+adapter drops that flag on a shim, which costs nothing. §6.0 shows that the flag sets
+register only and that correctness never depends on it. The instructions travel in the user
+turn, which on a shim is the stdin prompt.
 
-Consequence for `Task`: an adapter cannot hardcode "the prompt is an argument", so `build`
-receives the resolution (see §3) and the prompt's transport is a property of the harness on
-that OS, not of the harness.
+Consequence for `Task`: an adapter cannot hardcode "the prompt is an argument". The prompt's
+transport is a property of the harness on that OS, so `Task` carries the transport that the
+resolution decided (§3).
 
 ### 6.0 Measured constraint: system prompt flags do not survive resume
 
-Verified on `claude` 2.1.319 and `pi` 1.5.0. This determines the design.
+Verified on `claude` 2.1.319 and `pi` 1.5.0. This measurement determines the design.
 
 | Test | Result |
 |---|---|
@@ -281,21 +283,21 @@ Verified on `claude` 2.1.319 and `pi` 1.5.0. This determines the design.
 | claude `--resume`, instructions in the **user turn** | obeys the new instructions |
 | pi `--session-id` (create) → same id with changed `--system-prompt` | obeys the new system prompt |
 
-So claude silently discards both system-prompt flags on resume, while pi honours them.
-Relying on the flag would make "edit the instructions and press `Ctrl+R`" work on pi and
-silently do nothing on claude — the worst failure mode, since the output looks plausible.
+claude silently discards both system-prompt flags on resume. pi honours them. A design that
+relied on the flag would make "edit the instructions and press `Ctrl+R`" work on pi and do
+nothing on claude, and the output would still look plausible.
 
-**Decision: instructions always travel in the user turn.** The same template is used for
-every harness, both first call and continuation. `--system-prompt` is still passed on
-first call for claude and pi (it sets the register for the whole session and is cheap), but
-the app never depends on it for correctness. Consequence for the adapter: `build()` produces
-nearly identical argv for first call and continuation — only the session flag differs.
-codex has no system-prompt flag at all, which costs nothing for the same reason: measured,
-an instruction in the user turn takes effect on a continuation (§6.5).
+**Decision: the instructions always travel in the user turn.** Every harness uses the same
+template, for the first call and for a continuation. The app still passes `--system-prompt`
+on the first call for claude and pi, because it sets the register for the whole session and
+costs nothing, but correctness never depends on it. For the adapter this means that
+`build()` produces nearly identical argv for the first call and a continuation, and only the
+session flag differs. codex has no system-prompt flag, which costs nothing for the same
+reason: measured, an instruction in the user turn takes effect on a continuation (§6.5).
 
 ### 6.1 Fixed user prompt
 
-Identical for every harness and for both first call and continuation:
+Identical for every harness and for both the first call and a continuation:
 
 ```
 INSTRUCTIONS:
@@ -308,16 +310,16 @@ Return only the rewritten text, wrapped between the markers <<<TEXT>>> and <<<EN
 Put nothing else between the markers. Anything outside the markers is ignored.
 ```
 
-The marker instruction sits at the end because models weight the tail of the prompt most
-heavily. The template is fixed, not user-editable: task instructions go in the
-instructions pane, the wire format is the app's business.
+The marker instruction sits last, because a model weights the tail of the prompt most
+heavily. The app fixes the template and the user cannot edit it: task instructions go in
+the instructions pane, and the wire format is the app's business.
 
-**Why markers rather than "return only the text".** The instructions pane is free text and
-the user may ask for commentary — measured: instructions saying "add a short explanation of
-your changes" produce explanation plus `**Improved text:**` in the same reply, and no
-reliable boundary exists in that prose. Asking for markers converts an extraction *guess*
-into a *protocol*: measured on claude, pi and codex, the model wraps the result exactly as
-asked, including with preamble present.
+**Why markers, and not "return only the text".** The instructions pane is free text, so the
+user may ask for commentary. Measured: instructions that say "add a short explanation of your
+changes" produce an explanation plus `**Improved text:**` in the same reply, and that prose
+offers no reliable boundary. A marker turns extraction from a *guess* into a *protocol*.
+Measured on claude, pi and codex: the model wraps the result exactly as asked, even with a
+preamble present.
 
 Measured with markers:
 
@@ -327,14 +329,14 @@ Measured with markers:
 | instructions asking for formal text only | `<<<TEXT>>>` / text / `<<<END>>>` |
 | pi, same template | `<<<TEXT>>>text<<<END>>>` — **single line, no newlines around markers** |
 
-So extraction must not assume the markers sit on their own lines. It splits on the marker
-strings, wherever they are.
+So extraction does not assume that the markers stand on their own lines. It splits on the
+marker strings, wherever they are.
 
 ### 6.1a Extracting the rewritten text
 
-claude and pi are run in **streaming JSON mode** (§6.1b), and codex in its JSON mode, which
-is not a stream (§6.5). Every stdout line is fed to the adapter, which routes it to the
-debug pane; only the text **between the markers** reaches the output pane.
+claude and pi run in **streaming JSON mode** (§6.1b). codex runs in its JSON mode, which is
+not a stream (§6.5). The app feeds every stdout line to the adapter, which routes the line
+to the debug pane. Only the text **between the markers** reaches the output pane.
 
 Per harness, measured on claude 2.1.319, pi 1.5.0 and codex-cli 0.159.0:
 
@@ -342,107 +344,104 @@ Per harness, measured on claude 2.1.319, pi 1.5.0 and codex-cli 0.159.0:
 |---|---|---|---|
 | flag | `--output-format stream-json --verbose --include-partial-messages` | `--mode json` | `exec --json` (same flag on `exec resume`) |
 | final text event | `type == "result"` → `result` | last `message_end`, `role == "assistant"` | last `item.completed` with `item.type == "agent_message"` → `item.text` |
-| streamed text delta | `stream_event` → `event.type == content_block_delta` → `delta.type == text_delta` → `delta.text` | `message_update` → `assistantMessageEvent.type == text_delta` → `delta` | **none** — measured, no delta events are emitted |
-| reasoning delta | `delta.type == thinking_delta` | `assistantMessageEvent.type == thinking_delta` | **none emitted**, though `reasoning_output_tokens` is non-zero |
+| streamed text delta | `stream_event` → `event.type == content_block_delta` → `delta.type == text_delta` → `delta.text` | `message_update` → `assistantMessageEvent.type == text_delta` → `delta` | **none** — measured: codex emits no delta events |
+| reasoning delta | `delta.type == thinking_delta` | `assistantMessageEvent.type == thinking_delta` | **none**, though `reasoning_output_tokens` is non-zero |
 | session id | client-chosen, in the argv | client-chosen, in the argv | from `thread.started` → `thread_id` |
 
-**The terminal text is the last `agent_message`, never a tool item.** codex reports shell
-commands, file changes, web searches and MCP calls as their own
-`item.completed` events carrying output; taking "the last item with text" would put a
-command's stdout in the output pane. Only `item.type == "agent_message"` is prose.
+**The terminal text is the last `agent_message`, and never a tool item.** codex reports
+shell commands, file changes, web searches and MCP calls as their own `item.completed`
+events, each with output. A rule of "the last item with text" would put the stdout of a
+command in the output pane. Only `item.type == "agent_message"` is prose.
 
-**Nothing is ever reconstructed by concatenation.** Measured on claude: the terminal
-`result` event carries the complete answer, and the concatenated `text_delta`s are exactly
-equal to it (76 bytes vs 76 bytes). Deltas are display-only; their only consumer is the
-debug pane. This removes the whole class of bugs where a dropped delta silently truncates
-the output. For codex the rule is vacuous and still binding: there are no deltas to fall
-back to, so "exit 0 but no `agent_message`" is an error with nothing to guess from.
+**The app never reconstructs text by concatenation.** Measured on claude: the terminal
+`result` event carries the complete answer, and the concatenated `text_delta`s equal it
+exactly (76 bytes against 76 bytes). The app shows a delta in the debug pane and nowhere
+else, so no output text depends on a delta. This rule removes a whole class of bugs, where a
+dropped delta silently truncates the output. For codex the rule is trivial and still
+binding: codex emits no deltas to fall back on, so "exit 0 with no `agent_message`" is an
+error with nothing to guess from.
 
-**`--include-partial-messages` is required for claude.** Measured without it: the run emits
-`system`, `assistant`, `rate_limit_event`, `result` and **zero** `stream_event`s — no
-progress at all, even though the answer is complete. Measured with it: 11 `stream_event`s,
-6 text deltas, deltas match `result`. The flag is what turns the run into a stream.
+**claude requires `--include-partial-messages`.** Measured without it: the run emits
+`system`, `assistant`, `rate_limit_event`, `result` and **zero** `stream_event`s, so there
+is no progress even though the answer is complete. Measured with it: 11 `stream_event`s, 6
+text deltas, and the deltas match `result`. The flag is what turns the run into a stream.
 
-Extraction, applied once per run to the terminal text:
+Extraction. The app applies these steps once per run, to the terminal text:
 
 1. Find `<<<TEXT>>>` and `<<<END>>>` as plain substrings, in that order.
-2. Take everything strictly between them. Do not require newlines, indentation, or markers
-   on their own lines — measured: pi returns `<<<TEXT>>>text<<<END>>>` on one line.
-3. If both markers are present, the result is **success** regardless of what surrounds
-   them. Everything outside is discarded, which is the point of the protocol.
-4. **Fallback when a marker is missing:** the run is an **error**, not a guess. Show the raw
-   terminal text in the **debug pane** — never in the output pane, which holds final text only
-   (constraint 5) and stays as cleared on spawn (§5 step 5) — and set state `error` with "model
-   did not use the output markers". Never fall back to trimming or preamble-stripping: that is
-   precisely the heuristic the markers exist to remove.
-5. Trim surrounding whitespace inside the extracted text; preserve internal newlines
-   verbatim. Measured: paragraphs inside the markers keep their blank lines.
-6. If the extracted text contains a tool-invocation block (`<invoke name=…>`), the run is an
-   **error**: show it, explain. Measured cause: with tools denied the model prints the call
-   as text with exit 0. Nothing executed, but it is not a rewrite.
+2. Take everything strictly between them. Newlines, indentation and markers on their own
+   lines are not required — measured: pi returns `<<<TEXT>>>text<<<END>>>` on one line.
+3. When both markers are present, the run is a **success**, whatever surrounds them. The
+   app discards everything outside, which is the point of the protocol.
+4. **When a marker is missing, the run is an error, not a guess.** Show the raw terminal text
+   in the **debug pane**. The output pane holds final text only (§6.1b) and stays as the
+   spawn left it (§5, step 5). Set state `error` with "model did not use the output
+   markers". A fallback to trimming or preamble-stripping is the heuristic that the markers
+   exist to remove.
+5. Trim the whitespace around the extracted text and keep internal newlines verbatim.
+   Measured: paragraphs inside the markers keep their blank lines.
+6. When the extracted text contains a tool-invocation block (`<invoke name=…>`), the run is
+   an **error**. Show the block and explain it. Measured cause: with tools denied the model
+   prints the call as text and exits 0. Nothing executed, but the text is not a rewrite.
 7. No markdown unwrapping and no commentary stripping after step 2. The markers already
-   isolate the answer, so a fence the model put *inside* them is part of the text.
+   isolate the answer, so a fence that the model put *inside* them is part of the text.
 
-Why the fallback is strict: markers are cheap for the model and were honoured in every
-measured case, including when the prompt also asked for commentary. A missing marker means
-something is genuinely wrong (truncation, refusal, a confused model), and silently
-presenting whatever text arrived as the rewrite is the failure mode this design exists to
-prevent. The debug pane always holds the full raw output, so diagnosis costs one keypress.
+Why the rule is strict: markers are cheap for the model, and every measured case honoured
+them, including when the prompt also asked for commentary. A missing marker means that
+something is wrong: truncation, a refusal, or a confused model. Showing whatever text arrived
+as the rewrite is the failure mode that this design prevents. The debug pane always holds the
+full raw output, so diagnosis costs one keypress.
 
-claude and pi buffer stdout when emitting plain text — measured: claude wrote nothing for
-13 s, then the whole answer at once — which is why JSON streaming is required rather than
-optional (§6.1b). codex's JSON mode buffers per item instead (§6.5), which is the same
-problem one level up and the reason §6.1b names the status line as its progress signal.
+claude and pi buffer stdout in plain-text mode, so the design requires JSON streaming rather
+than treating it as optional (§6.1b). The codex JSON mode buffers per item instead (§6.5),
+which is the same problem one level up.
 
-- pi's stderr carries one line, `Warning: No project session found … creating a new
-  session`. It goes to the debug pane.
-- **Rejected alternative:** `claude --output-format json` (single result object, `.result`
-  is exactly the answer with no wrapper). It cannot stream: no progress signal, and it
-  gives claude a JSON shape pi does not share.
+**Rejected alternative:** `claude --output-format json` (one result object, and `.result` is
+exactly the answer with no wrapper). It cannot stream, so it gives no progress signal, and it
+gives claude a JSON shape that pi does not share.
 
 ### 6.1b Streaming
 
-Progress is rendered incrementally into the **debug pane**, never the output pane.
+The debug pane shows progress incrementally. The output pane never shows progress.
 
 Measured throughput on a long rewrite: claude emits continuously from t=1s, pi from t=1s.
-Both were fully buffered in plain-text mode (claude wrote nothing for 13 s, then the whole
-answer), so JSON streaming is the only way to avoid an inert window during a run.
+Plain-text mode buffered both (claude wrote nothing for 13 s, then the whole answer), so
+JSON streaming is the only way to keep the window live during a run.
 
 Consequences:
 
-- The **output pane** is written exactly once per run, when the terminal event arrives.
-  Between runs it shows the last good result. It never shows partial text.
-- The **debug pane** receives every stdout event (`text`, `think`, `junk`), all stderr
-  (`err`), and app events (`app`: run start, exit, duration, errors). Reasoning is visible
-  here on purpose — it is the debug view, and it cannot be mistaken for the result.
-- On spawn the output pane is cleared, so the view plainly states that a new action started.
-  The previous result is deliberately lost at that moment: `Ctrl+Z` undoes edits to the two
-  editable buffers only, never the read-only panes.
-- Nothing is interpreted as markdown. A half-emitted fence or `**` is shown literally, so a
-  partial stream can never corrupt the display.
-- Events are drained from the `mpsc` channel once per UI tick (~16 ms) and rendered once per
-  tick. Measured volume is ~280 lines (claude) to ~550 (pi) per run; per-event redraws would
-  be wasteful, so per-tick batching is required, not an optimisation.
-- The debug pane auto-tails unless the user has scrolled up, in which case it keeps its
-  offset and shows a "not tailing" marker.
+- The app writes the **output pane** exactly once per run, when the terminal event arrives.
+  Between runs the pane shows the last good result. It never shows partial text.
+- The **debug pane** receives every stdout event, all stderr, and app events. §7 gives the
+  labels. A rejected answer's raw text arrives under `raw`, so a reader never mistakes it for
+  progress. Reasoning appears here on purpose: this is the debug view, and its content cannot
+  be mistaken for the result.
+- A spawn clears the output pane, so the previous result is deliberately lost at that
+  moment. `Ctrl+Z` undoes edits to the two editable buffers only, and never the read-only
+  panes.
+- The panes show markdown syntax literally. A half-emitted fence or `**` appears as text, so
+  a partial stream cannot damage what the user sees.
+- The app drains the `mpsc` channel once per UI tick (~16 ms) and renders once per tick. §7
+  gives the measured event volume. Per-event redraws would be wasteful, so per-tick
+  batching is a requirement, not an optimisation.
 
-**Streaming requires `--verbose` and `--include-partial-messages` for claude.** Measured:
+**claude requires `--verbose` and `--include-partial-messages` for streaming.** Measured:
 `--output-format stream-json` with `-p` exits 1 and prints
-`Error: When using --print, --output-format=stream-json requires --verbose`; and without
+`Error: When using --print, --output-format=stream-json requires --verbose`. Without
 `--include-partial-messages` the run emits zero `stream_event`s, so there is no progress to
-show. Both flags are mandatory. pi needs neither — `--mode json` streams as-is.
+show. Both flags are mandatory. pi needs neither, because `--mode json` streams as-is.
 
-**codex cannot stream, and that is a limitation of the harness, not a missing flag.**
-Measured on a 300-word answer: `exec --json` emits `thread.started`, `turn.started`, then
-**one** `item.completed` carrying the whole `agent_message` at t≈21 s, then
-`turn.completed`. There is no per-token event in that mode — the binary does contain an
-`AgentMessageDeltaNotification`, but it belongs to the app-server protocol, not to
-`exec --json`. So for codex the debug pane is inert between items by necessity: the first
-lines land at t≈0.7 s and nothing follows until the answer arrives whole. The progress
-signal during a codex run is therefore the **status line's `running` state**, which is why
-it is drawn from the state machine rather than inferred from arriving text. Do not "fix"
-this by reaching for an unpublished transport: the app already shows what the harness gives
-it, and the output pane is written once per run either way.
+**codex cannot stream. This is a limitation of the harness, not a missing flag.** Measured on
+a 300-word answer: `exec --json` emits `thread.started`, `turn.started`, then **one**
+`item.completed` that carries the whole `agent_message` at t≈21 s, then `turn.completed`.
+That mode has no per-token event. The binary does contain an `AgentMessageDeltaNotification`,
+but that notification belongs to the app-server protocol and not to `exec --json`. So on
+codex the debug pane is inert between items by necessity: the first lines land at t≈0.7 s,
+and nothing follows until the answer arrives whole. During a codex run the **status line's
+`running` state** is the progress signal. That is why the app draws the state from the state
+machine and does not infer it from arriving text. Reach for the app-server transport only if
+it becomes public: the app already shows what the harness gives it, and the output pane is
+written once per run either way.
 
 ### 6.2 claude
 
@@ -468,28 +467,27 @@ claude -p --resume <uuid> --output-format stream-json --verbose
        -- <user prompt>
 ```
 
-- `--session-id` requires a valid UUID v4 → generate one. Measured: an empty or invalid
-  id makes `--resume` fail with exit 1 and
-  `Error: --resume requires a valid session ID or session title when used with --print`.
-  Treat a missing id as a bug, never send it.
-- `--system-prompt` replaces Claude's coding-agent prompt entirely. Passed for register
-  only (§6.0); correctness never depends on it.
-- `--tools ""` is documented as "use `""` to disable all tools". The argv must carry the
-  flag with an empty value; omitting it means default tools. Measured: three attempts to
-  make claude write a file all failed to create it, and asked to enumerate its tools it
+- `--session-id` requires a valid UUID v4, so the adapter generates one. Measured: an empty
+  or invalid id makes `--resume` fail with exit 1 and `Error: --resume requires a valid
+  session ID or session title when used with --print`. A missing id is a bug, and the app
+  never sends one.
+- `--system-prompt` replaces the claude coding-agent prompt entirely. The app passes it for
+  register only (§6.0), and correctness never depends on it.
+- `--tools ""` is documented as "use `""` to disable all tools". The argv must carry the flag
+  with an empty value, because an omitted flag gives the default tool set. Measured: three
+  attempts to make claude write a file each failed, and asked to enumerate its tools claude
   answered `NONE`.
-- `--permission-prompts none` is required for latency, not for safety. Measured: a prompt
-  that makes the model attempt a denied tool call stalls until the timeout when a
-  permission prompt would be raised, because nothing answers it. With this flag the same
-  case returns in seconds with the call printed as text (§6.1a step 3).
-- `--verbose` is mandatory with `-p` and `stream-json`, see §6.1b.
-- `--include-partial-messages` is **required**; without it the run emits no `stream_event`
-  at all (§6.1a). This corrects an earlier assumption that `content_block_delta` arrives by
-  default — it does not.
+- Measured: with `--permission-prompts none` absent, a prompt that makes the model attempt a
+  denied tool call stalls until the timeout, because no one answers the permission prompt.
+  With the flag the same case returns in seconds with the call printed as text (§6.1a, step
+  6). The flag serves latency, not safety.
+- `--verbose` is mandatory with `-p` and `stream-json`. See §6.1b.
+- `--include-partial-messages` is **required**, because without it the run emits no
+  `stream_event` at all (§6.1a). `content_block_delta` does not arrive by default.
 
 ### 6.3 pi
 
-First call and continuation are the *same* argv; pi's `--session-id` means "open the
+The first call and a continuation use the *same* argv. The pi `--session-id` means "open the
 existing session with this id, or create it":
 
 ```
@@ -500,42 +498,49 @@ pi --print --session-id <id> --mode json
    -- <user prompt>
 ```
 
-- Session ids accept `[A-Za-z0-9._-]` and must start and end with a letter or digit.
-  Generated as `psc-<uuid>` (no trailing hyphen, starts with a letter).
+- Session ids accept `[A-Za-z0-9._-]` and must start and end with a letter or digit. The
+  adapter generates `psc-<uuid>`, which has no trailing hyphen and starts with a letter.
 - `--mode json` is the streaming form. Measured: text deltas arrive from t=1s, ~547 JSON
-  lines per run. Unlike claude, pi needs no extra flag to make this work.
-- `--system-prompt` replaces pi's agent prompt. With all tools, skills, MCP and context
-  files disabled, that agent prompt has nothing to do; replacing it is correct.
-- `--no-context-files` is load-bearing and was verified separately: without it the system
-  message carries `project_context` (2759 bytes of the user's own `AGENTS.md`) into every
-  request. With it, the system message sections are only `preamble` and `cwd`. A rewrite
-  must not silently inherit the user's coding guidelines.
-- Measured: pi obeys a changed `--system-prompt` on an existing session, unlike claude. It
-  is still sent through the user turn for uniformity (§6.0) — one template, one code path,
-  no per-harness instruction plumbing.
-- Measured: the first use of an id prints
-  `Warning: No project session found with id '…'; creating a new session with that id.` to
-  **stderr**. It appears in the debug pane and is harmless; no filtering needed.
+  lines per run. pi needs no extra flag to stream.
+- `--system-prompt` replaces the pi agent prompt. With all tools, skills, MCP and context
+  files disabled, that agent prompt has nothing to do, so a replacement prompt is the right
+  choice.
+- `--no-context-files` is load-bearing. Measured separately: without it the system message
+  carries `project_context`, 2759 bytes of the user's own `AGENTS.md`, into every request.
+  With it the system message sections are only `preamble` and `cwd`. A rewrite must not
+  inherit the user's coding guidelines by accident.
+- Measured: pi obeys a changed `--system-prompt` on an existing session, unlike claude. The
+  app sends the instructions through the user turn anyway, for uniformity (§6.0): one
+  template, one code path, no per-harness instruction plumbing.
+- Measured: the first use of an id prints this line to **stderr**:
+  `Warning: No project session found with id '…'; creating a new session with that id.`
+  The debug pane shows it. The line is harmless, so the app filters nothing.
 
 ### 6.4 Why a trait, and what it costs
 
-The three harnesses differ in five places: the session flag for a new session vs a
-continuation, the id format (UUID v4 vs `[A-Za-z0-9._-]` vs a harness-chosen `01a1…`), the
-tool-denial flags, the event vocabulary (`stream_event`/`result` vs
-`message_update`/`agent_end` vs `item.completed`/`thread.started`), and **who names the
-session** (client vs harness, §6). Everything else — prompt template, output rules, process
-management — is shared. The event vocabulary is the largest of the five and the reason
-`classify`/`final_text` exist on the trait; who names the session is the reason
-`new_session_id` returns an `Option` and `session_from_event` exists at all.
-`Harness::build` is a pure function, so every adapter gets table tests over its argv
-without spawning anything. The `Task` carries `session: Option<&str>`, where `None` means
-"first call of this run"; the adapter, not the app, decides which flag that implies.
+The three harnesses differ in five places:
+
+- the session flag for a new session and for a continuation
+- the id format: UUID v4, or `[A-Za-z0-9._-]`, or a harness-chosen `01a1…`
+- the tool-denial flags
+- the event vocabulary: `stream_event`/`result`, `message_update`/`agent_end`, or
+  `item.completed`/`thread.started`
+- **who names the session**: the client, or the harness (§6)
+
+All else is common to the three: the prompt template, the output rules, and process
+management. The event vocabulary is the largest of the five, and it is the reason `classify`
+and `final_text` sit on the trait. Who names the session is the reason `new_session_id`
+returns an `Option` and `session_from_event` exists.
+
+`Harness::build` is a pure function, so each adapter gets table tests over its argv and
+starts no process. `Task` carries `session: Option<&str>`, where `None` means "first call of
+this run". The adapter decides which flag that implies, not the app.
 
 ### 6.5 codex
 
 Measured on codex-cli 0.159.0. This section is longer than §6.2 and §6.3 because two of its
 findings contradict what the rest of §6 assumes about *any* harness: codex has no
-tool-denial flag (only a sandbox), and codex cannot stream.
+tool-denial flag and runs in a sandbox instead, and codex cannot stream.
 
 First call:
 
@@ -559,217 +564,228 @@ codex exec resume --json
       -- -
 ```
 
-The prompt travels on **stdin** in both shapes (`-- -` makes the positional a literal dash
-and codex reads the prompt from the pipe), so `Invocation.stdin` is always `Some` and `args`
-never carries the prompt. Measured: both transports round-trip the real template with every
-newline and both markers intact, so this is a choice, not a workaround — it keeps user prose
-out of the OS argument list, and sidesteps the batch-shim limit §6 documents.
+The prompt travels on **stdin** in both shapes. `-- -` makes the positional a literal dash,
+so codex reads the prompt from the pipe. `Invocation.stdin` is therefore always `Some`, and
+`args` never carries the prompt. Measured: both transports round-trip the real template with
+every newline and both markers intact, so this is a choice and not a workaround. It keeps
+user prose out of the OS argument list, and it avoids the batch-shim limit that §6 documents.
 
-Each flag below was measured; the reason is what keeps it from being "tidied" away.
+The app measured each flag below. Each reason keeps its flag from being "tidied" away.
 
-- **`-c sandbox_mode="read-only"` *and* `-c approval_policy="never"`, together.** This is
-  the substitution for `--tools ""` and `--no-tools`, and the pair is load-bearing.
-  Measured: `-s read-only` alone leaves approvals on-request and a write succeeded in 3 of 3
-  runs; `-c sandbox_mode` alone likewise. The two together blocked every attempt (9 of 9,
-  across a git repo and a plain directory, including a shell fetch and a write attempted
-  through the residual JS REPL, which failed with `EPERM`). `-c` is used rather than `-s`
-  because `exec resume` rejects `-s` (`unexpected argument`), and one flag shape for both
-  call shapes is one place to get it wrong instead of two.
-- **`-c project_doc_max_bytes=0`.** codex's `--no-context-files`. Measured: without it the
-  user's own `AGENTS.md` is in the prompt and the model reproduces it verbatim when asked;
-  with it, absent. A rewrite must not silently inherit the user's coding guidelines.
-- **`-c features.apps=false`.** Measured: 147 tools offered become 29, and the whole Codex
-  app MCP surface leaves the prompt.
-- **`-c web_search="disabled"` — and it only works in combination with the flag above.**
+- **`-c sandbox_mode="read-only"` *and* `-c approval_policy="never"`, together.** This pair
+  replaces `--tools ""` and `--no-tools`, and the pair is load-bearing. Measured:
+  `-s read-only` alone leaves approvals on-request, and a write succeeded in 3 of 3 runs.
+  `-c sandbox_mode` alone behaves the same way. The two flags together blocked every attempt
+  (9 of 9, across a git repo and a plain directory, including a shell download and a write
+  attempted through the residual JS REPL, which failed with `EPERM`). The adapter uses `-c`
+  and not `-s` because `exec resume` rejects `-s` (`unexpected argument`), and one flag shape
+  for both call shapes is one place to get wrong instead of two.
+- **`-c project_doc_max_bytes=0`.** This is codex's `--no-context-files`. Measured: without it
+  the prompt contains the user's own `AGENTS.md`, and the model reproduces that file verbatim
+  when asked. With it, the file is absent. A rewrite must not inherit the user's coding
+  guidelines by accident.
+- **`-c features.apps=false`.** Measured: the offered tools drop from 147 to 29, and the
+  whole Codex app MCP surface leaves the prompt.
+- **`-c web_search="disabled"`, which works only in combination with the flag above.**
   Measured, and the pairing is the whole point: with `features.apps=false` alone the model
-  can still search (`apps=false only` returned a live headline through the `web__run`
-  tool); with `web_search="disabled"` alone it can still search too. Only the two together
-  produced `NO-WEB-ACCESS`. So neither flag is redundant, and neither is sufficient.
+  can still search (`apps=false only` returned a live headline through the `web__run` tool),
+  and with `web_search="disabled"` alone it can still search too. Only the two together
+  produced `NO-WEB-ACCESS`. So neither flag is redundant, and neither flag is sufficient.
 - **Not used: `-c tools.web_search=false`.** Measured: it does not remove the tool
   (`web__run` stayed), so it would read as a denial that denies nothing.
 - **`--skip-git-repo-check`.** Measured: without it codex refuses to run outside a git repo
-  with `Not inside a trusted directory`, which would make the app fail in every directory
-  that is not a checkout.
-- **`--json`.** The machine-readable mode; `exec resume` needs it repeated.
+  with `Not inside a trusted directory`, which would fail the app in every directory that is
+  not a checkout.
+- **`--json`.** This is the machine-readable mode. `exec resume` needs the flag repeated.
 
-**Deliberately absent: `--ignore-user-config` and `-s`.** `--ignore-user-config` disables
-the user's own `config.toml`, which is where their model choice lives, and measured it also
-changed whether writes were blocked; using it would swap "the user's config is respected"
-for a second, weaker layer of denial. A future change that reaches for either flag is a
-regression, so §6.5 names them.
+**Deliberately absent: `--ignore-user-config` and `-s`.** `--ignore-user-config` disables the
+user's own `config.toml`, which holds their model choice, and measured it also changed
+whether codex blocked a write. Using it would trade "codex respects the user's config" for a
+second, weaker layer of denial. A later change that reaches for either flag is a regression,
+so §6.5 names both.
 
-**Session lifecycle is inverted, and this is why the trait changed.** codex names its own
-threads: `-c thread_id=…` is ignored, and the id appears only on stdout as
-`{"type":"thread.started","thread_id":"01a1bc…"}`. So `new_session_id` returns `None` and the
-app learns the id through `session_from_event` (`§6`), taking the first id it is offered and
-keeping it for the run. `Ctrl+N` still works, because an unnamed first call is a new thread
-and its id is learned from its own stream.
+**codex names its own threads, so a session starts with the harness.** codex ignores
+`-c thread_id=…`, and the id appears only on stdout as
+`{"type":"thread.started","thread_id":"01a1bc…"}`. So `new_session_id` returns `None`, and
+the app learns the id through `session_from_event` (`§6`) when it takes the first id on
+offer. The app keeps that id for the run. `Ctrl+N` works, because an unnamed first call is a
+new thread and the app learns its id from its own stream.
 
-**Tool denial is sandbox-level here, which is weaker than §1 asks.** codex cannot be denied
-its tools: the config keys that look like denials are rejected by `--strict-config`
-(`unknown configuration field`) or do nothing, and a JS REPL (`mcp__node_repl__js`,
-`mcp__cua_repl.js`) survives every filter. What holds is the sandbox: read-only filesystem,
-approvals never answered, network refused (measured: a shell fetch fails). No run reached
-the filesystem, which is §1's actual requirement, but it is enforced one layer lower than
-for claude and pi, so "tools are disabled" would be a false statement about codex. A human
-accepted this trade rather than dropping codex support; the alternative — refusing the
-adapter — was rejected because the observable guarantee (nothing is written) holds.
+**On codex, tool denial is sandbox-level, which is weaker than §1 asks.** codex cannot lose
+its tools: `--strict-config` rejects the config keys that look like denials (`unknown
+configuration field`), or they do nothing, and a JS REPL (`mcp__node_repl__js`,
+`mcp__cua_repl.js`) survives every filter. The sandbox holds: read-only filesystem, no
+approval ever answered, network refused (measured: a shell download fails). No measured run
+reached the filesystem, which is §1's actual requirement. The sandbox enforces that
+requirement one layer lower than the tool denial does for claude and pi, so "tools are
+disabled" would be false for codex. A human accepted this trade instead of dropping codex
+support. The app could refuse the adapter, and the design rejected that alternative because
+the observable guarantee holds: no measured run writes anything.
 
 **Residual cost, accepted.** codex injects its own developer prompt and a skills catalogue
 (~30 KB of local `SKILL.md` descriptions, ~18 k input tokens) into every call, and no config
-key found suppresses it (`skills_instructions`, `include_skills_usage_instructions`,
-`features.skill_search=false` are all rejected). It costs tokens and register, not
-correctness: measured, the markers still come back.
+key found so far suppresses it (`skills_instructions`,
+`include_skills_usage_instructions`, `features.skill_search=false` are all rejected). It
+costs tokens and register, not correctness: measured, the markers still come back.
 
 **No stream.** See §6.1b: codex emits one complete `agent_message`, so the debug pane fills
-in jumps. Recorded there rather than here because it is a property of the JSON mode, not of
-the argv.
+in jumps. §6.1b records this because it is a property of the JSON mode, not of the argv.
 
-Measured end to end on the exact argv above: first call `<<<TEXT>>>Arrr, send me the
-report, matey.<<<END>>>`, continuation with changed instructions `<<<TEXT>>>You are hereby
-requested to furnish the report to the undersigned.<<<END>>>` on the same thread id, the
-user's `AGENTS.md` never present, and no file created.
+Measured end to end on the exact argv above: the first call returned
+`<<<TEXT>>>Arrr, send me the report, matey.<<<END>>>`. A continuation with changed
+instructions returned `<<<TEXT>>>You are hereby requested to furnish the report to the
+undersigned.<<<END>>>` on the same thread id. The user's `AGENTS.md` never appeared, and no
+measured run created a file.
 
 ## 7. Process handling
 
-- `std::process::Command` with `stdout`/`stderr` piped; one reader thread per stream
-  (`BufRead::lines`) sending `(Stream, String)` over an `mpsc` channel.
-- The UI thread never blocks: it drains the channel each tick (~16 ms) and redraws once per
-  tick. Measured event volume is ~280 lines for claude, ~550 for pi and **~7 for codex**
-  per rewrite, so per-event redraws would be wasteful; per-tick batching is required, not
-  an optimisation.
-- Each stdout line goes to the active harness's `classify` and is appended to the debug pane
-  with its kind. `final_text` is consulted on every line; at most one line per run returns
-  `Some`, and that text is what the output pane receives. Lines that do not parse as JSON
-  are shown as `junk` — a harness printing garbage is a diagnosable event, not a failure.
-- For a harness that names its own session, `session_from_event` is also consulted on every
-  line until an id is known, and only until then: codex announces its thread once, and a
-  later id can only belong to a run the app did not start.
-- Cancellation: kill the child, state `cancelled`, output pane stays as cleared on spawn.
-  A cancelled run produces no final text by definition, so there is nothing to show and
-  nothing to reconcile.
-- Wall-clock timeout: 180 s default. On timeout, kill and report.
-- The debug pane is a bounded ring buffer (2000 lines) so memory stays flat.
-- Non-UTF-8 output is converted lossily.
-- **Both streams go to the debug pane, and neither goes to the output pane.** stdout is the
-  event stream, labelled by kind; stderr is labelled `err`; the app adds `app` lines for run
-  start/end, exit status, duration and errors. The output pane is written once, from the
-  terminal event only.
+- `std::process::Command` with `stdout` and `stderr` piped. One reader thread per stream
+  reads with `BufRead::lines` and sends `(Stream, String)` over an `mpsc` channel.
+- The UI thread never blocks. It drains the channel each tick (~16 ms) and redraws once per
+  tick. Measured event volume per rewrite: ~280 lines for claude, ~550 for pi and **~7 for
+  codex**. Per-event redraws would be wasteful, so per-tick batching is a requirement, not an
+  optimisation.
+- Each stdout line goes to the active harness's `classify` and reaches the debug pane with its
+  kind. The app consults `final_text` on every line. At most one line per run returns `Some`,
+  and that text is what the output pane receives. A line that is not JSON shows as `junk`: a
+  harness that prints garbage is a diagnosable event, not a failure.
+- For a harness that names its own session, the app also consults `session_from_event` on
+  every line until it has an id, and only until then. codex announces its thread once, and a
+  later id can only belong to a run that the app did not start.
+- Cancellation: the app kills the child and settles the run as an error with the note
+  `cancelled`. The output pane stays as the spawn left it. A cancelled run produces no final
+  text by definition, so there is nothing to show and nothing to reconcile.
+- Wall-clock timeout: 180 s by default. On timeout the app kills the child and reports.
+- The debug pane is a bounded ring buffer (2000 lines), so memory stays flat.
+- The app converts non-UTF-8 output lossily.
+- **Both streams reach the debug pane, and neither reaches the output pane.** The app labels
+  every debug line by origin: stdout events by kind, stderr as `err`, the model's raw text for
+  a rejected answer as `raw`, and its own run start, run end, exit status, duration and error
+  notes as `app`. The app writes the output pane once, from the terminal event.
 
 ## 8. Errors
 
-Every failure produces a human-readable status-line message and a debug-pane entry. The app must
-not panic on harness misbehaviour, and must restore the terminal on any exit path
-(success, error, panic).
+Each failure produces a human-readable status-line message and a debug-pane entry. The app
+must not panic on harness misbehaviour, and must restore the terminal on every exit path:
+success, error, and panic.
 
 Measured failure modes worth encoding:
 
 | Condition | Behaviour |
 |---|---|
-| Harness binary not found | Startup error to stderr, exit non-zero, no UI drawn (§3) |
-| Empty instructions | Validation error, focus to instructions pane |
-| Empty source text | Validation error, focus to source pane |
-| Session id missing/invalid with `--resume` | Never reachable: id is internal state, generated before use. Treat as a bug — debug assert |
-| Session id never announced by the harness | State `error` when the run ends with no id and no terminal text; a continuation cannot be attempted without one, and the status line keeps `—` |
-| Non-zero exit | State `error`, debug tail visible (claude puts the reason on stderr); output pane keeps the cleared state for this run |
+| Harness binary not found | Startup error to stderr, non-zero exit, no UI drawn (§3) |
+| Empty instructions | Validation error, focus moves to the instructions pane |
+| Empty source text | Validation error, focus moves to the source pane |
+| Session id missing or invalid with `--resume` | Never reachable. The id is internal state and the app generates it before use. An adapter that receives no id opens a new session, and does not send `--resume` with an empty one |
+| The harness never announces a session id | The id stays unknown and the status line keeps `—`. The next rewrite is a first call, which opens a new session. This is not an error by itself. Only a run that also produced no terminal text ends in error |
+| Non-zero exit | State `error`, debug tail visible (claude puts the reason on stderr), output pane keeps the cleared state for this run |
 | Timeout | Kill, state `error`, debug pane notes the timeout |
-| Clipboard unavailable | Status-line warning, everything else still works |
+| Clipboard unavailable | Status-line warning, and every other feature still works |
 | Non-UTF-8 output | Lossy conversion |
-| Markers honoured | Text between `<<<TEXT>>>` and `<<<END>>>` becomes the output; everything outside is discarded (§6.1a) |
+| Markers honoured | The text between `<<<TEXT>>>` and `<<<END>>>` becomes the output, and the app discards everything outside (§6.1a) |
 | Missing output markers | State `error`, raw terminal text shown, debug pane holds the full output (§6.1a) |
-| Tool-call XML between markers | State `error`, text shown, debug explains that tools are denied (§6.1a) |
-| Exit 0 but no terminal event | State `error`: no `result`/`agent_end`/`agent_message` means no final text. Never fall back to concatenating deltas (§6.1a) |
+| Tool-call XML between markers | State `error`, text shown, debug pane explains the tool denial (§6.1a) |
+| Exit 0 with no terminal event | State `error`. Without a `result`, `agent_end`, or `agent_message` there is no final text, and the app never concatenates deltas as a fallback (§6.1a) |
 
-Exit codes: `0` normal, `1` runtime failure (including harness missing), `2` CLI misuse.
+Exit codes: `0` normal, `1` runtime failure (including a missing harness), `2` CLI misuse.
 
 ## 9. Implementation
 
-Crates: `ratatui`, `crossterm`, `clap` (derive), `arboard`, `uuid`, `anyhow`.
+Crates: `ratatui`, `crossterm`, `clap` (derive), `arboard`. The adapter generates session ids
+from `std::hash::RandomState` plus the clock (`src/harness/claude.rs`), so there is no `uuid`
+crate. Errors are per-module types, so there is no `anyhow` crate.
 
 ```
-src/main.rs         arg parsing, terminal setup/teardown, panic hook restoring the TTY
-src/app.rs          App state, event loop, rewrite state machine
-src/ui.rs           layout, pane rendering, keybindings -> actions
-src/harness/mod.rs  Harness trait, Task, Invocation
+src/main.rs          startup, terminal setup/teardown, panic hook that restores the TTY,
+                     the event loop and the paste-burst collector
+src/cli.rs           arg parsing and startup validation
+src/layout.rs        pane geometry and focus
+src/ui.rs            pane rendering, keybindings to actions, status line, help panel
+src/editor.rs        buffer, cursor, edit operations
+src/wrap.rs          soft wrap and wrap-aware movement
+src/undo.rs          per-pane undo stack
+src/clipboard.rs     the system clipboard
+src/rewrite.rs       the rewrite state machine
+src/panes.rs         output and debug pane contents, stream routing
+src/process.rs       spawn, stream readers, cancel, timeout
+src/marker.rs        extracting the rewritten text from the terminal event
+src/harness/mod.rs   Harness trait, Task, Invocation, the fixed prompt
+src/harness/resolve.rs  harness name to the program that a spawn needs
 src/harness/claude.rs
 src/harness/pi.rs
 src/harness/codex.rs
-src/process.rs      spawn, stream readers, cancel, timeout
 ```
 
-Ratatui ships no text editor widget, so the two editable panes need a small shared editor
-type: buffer, cursor, soft-wrap-aware vertical movement, insert/delete, and no selection.
-It is written once and used by both panes.
+Ratatui ships no text editor widget, so the two editable panes need one small shared editor
+type. It holds a buffer and a cursor, moves vertically with soft-wrap awareness, and applies
+edits. It has no selection. The app owns one definition and both panes share it.
 
-Undo is a bounded stack of buffer snapshots kept per pane beside the wrap state, not inside
-the editor type: a snapshot is `(lines, cursor)`, and a history of editors stored inside an
-editor would make the snapshot recursive. One step is one public editor call, which
-is why the editor's public methods must not call each other (a paste is one call, so it is
-one step). A snapshot is recorded only when the buffer actually changed, so no-op edits cost
-nothing.
+Undo is a bounded stack of buffer snapshots, kept per pane beside the wrap state and not
+inside the editor type. A snapshot is `(lines, cursor)`, and a history of editors stored
+inside an editor would make the snapshot recursive. One step is one public editor call,
+which is why the editor's public methods do not call each other: a paste is one call, and
+therefore one step. The app records a snapshot only when the buffer changes, so a no-op edit
+costs nothing.
 
-Testability: `Harness::build` is pure → argv table tests. `process.rs` is tested against a
-fake binary (a shell script echoing fixed output, sleeping, or exiting non-zero). The state
-machine is tested headlessly, with the terminal backend stubbed.
+Testability: `Harness::build` is pure, so each adapter gets argv table tests. The app tests
+`process.rs` against `tests/fixtures/*.sh` run under `sh` (fixed output, a sleep, a hang, a
+non-zero exit). The state machine runs headless, with the terminal backend stubbed.
 
-## 10. Milestones
+## 10. Verification
 
-1. **M1 — shell.** Args, terminal setup/teardown, four-pane layout, focus cycling
-   (`Tab`/`Shift+Tab`/`Ctrl+←→`), editing, clipboard load/copy/paste, quit. Verify:
-   manual run; no harness needed; every pane reachable and focus visible.
-2. **M2 — streaming rewrite.** Claude adapter (`stream-json`, `--verbose`,
+Unit tests cover each module. The checks below need a real harness or a real terminal, and
+they are the manual script to follow before a harness-related change ships.
+
+1. **Shell.** Args, terminal setup and teardown, the four-pane layout, focus cycling
+   (`Tab`/`Shift+Tab`/`Ctrl+←→`), editing, clipboard load/copy/paste, quit. Check: a manual
+   run needs no harness, every pane is reachable, and focus is visible.
+2. **Streaming rewrite.** Claude adapter (`stream-json`, `--verbose`,
    `--include-partial-messages`), process spawn, JSON line → `classify` → debug pane,
-   `final_text` → output pane, validation. Verify: the debug pane advances during a >10 s
-   rewrite instead of sitting inert; the output pane stays empty until the run ends, then
-   shows the complete text; empty instructions are refused and focus jumps to the
-   instructions pane; `think` lines appear in the debug pane only; a response with no
-   markers sets state `error` and never lands in the output pane.
-3. **M3 — sessions.** Session id lifecycle, resend into an existing session, `Ctrl+N`.
-   Verify: with a new instruction ("now as a pirate") the second rewrite visibly changes
-   register — this is the regression test for §6.0, which would silently pass with a
-   plausible-looking answer if instructions went back to the system-prompt flag.
-   `Ctrl+N` then forgets the context.
-4. **M4 — pi adapter.** Second adapter proves the trait. Verify: argv table tests, plus one
-   live run asserting a changed instruction takes effect on the same session id, and that
-   `--no-context-files` keeps `AGENTS.md` out of the system message.
-5. **M5 — robustness.** Cancel, timeout, error paths, resize, missing-terminal-event
-   handling, debug pane ring-buffer trimming.
-6. **M6 — codex adapter.** Third adapter, and the one that exercises the harness-named
-   session path. Verify: argv table tests for both call shapes; the thread id is learned
-   from `thread.started` and survives a continuation, so a changed instruction takes effect
-   on the same thread (the §6.0 regression, measured: pirate → legal register); `Ctrl+N`
-   produces a different thread id and drops the context; a prompt that tells the model to
-   write a file leaves no file behind, and one that asks it to quote `AGENTS.md` yields
-   nothing; the debug pane does **not** stream, per §6.1b, and that is not a defect.
-6. **M6 — codex adapter.** Third adapter, and the one that exercises the harness-named
-   session path. Verify: argv table tests for both call shapes; the thread id is learned
-   from `thread.started` and survives a continuation, so a changed instruction takes effect
-   on the same thread (the §6.0 regression, measured: pirate → legal register); `Ctrl+N`
-   produces a different thread id and drops the context; a prompt that tells the model to
-   write a file leaves no file behind, and one that asks it to quote `AGENTS.md` yields
-   nothing; the debug pane does **not** stream, per §6.1b, and that is not a defect.
+   `final_text` → output pane, validation. Check: the debug pane advances during a >10 s
+   rewrite instead of sitting inert. The output pane stays empty until the run ends, then
+   shows the complete text. The app refuses empty instructions and moves focus to the
+   instructions pane. `think` lines appear in the debug pane only. A response with no markers
+   sets state `error` and never lands in the output pane.
+3. **Sessions.** Session id lifecycle, resend into an existing session, `Ctrl+N`. Check: with
+   a new instruction ("now as a pirate") the second rewrite visibly changes register. This is
+   the regression test for §6.0, which would silently pass with a plausible-looking answer if
+   the instructions went back to the system-prompt flag. `Ctrl+N` then forgets the context.
+4. **pi adapter.** Check: argv table tests, plus one live run that asserts that a changed
+   instruction takes effect on the same session id, and that `--no-context-files` keeps
+   `AGENTS.md` out of the system message.
+5. **Robustness.** Cancel, timeout, error paths, resize, a missing terminal event, and
+   ring-buffer trimming in the debug pane.
+6. **codex adapter.** Check: argv table tests for both call shapes. The app learns the thread
+   id from `thread.started`, and the id survives a continuation, so a changed instruction
+   takes effect on the same thread (§6.0 regression, measured pirate → legal register).
+   `Ctrl+N` produces a different thread id and drops the context. A prompt that tells the
+   model to write a file leaves no file behind, and a prompt that asks the model to quote
+   `AGENTS.md` yields nothing. The debug pane does **not** stream, per §6.1b, and that is not
+   a defect.
 
 ## Decisions
 
-Settled since v0.1: instructions travel in the user turn (§6.0, measured); source text is
-resent on every rewrite (cheap, a few paragraphs); one session per run; nothing is
-persisted; `Esc` does nothing, `Ctrl+Q` quits and is the only quit key, `Ctrl+C` copies the
-focused pane and cancels only in the debug pane after a confirming second press, so the key
-keeps its terminal meaning of copy; output pane = final text only, debug pane
-= streaming/reasoning/stderr/app events; output pane cleared on spawn;
-harness binary is checked at startup and missing means a stderr error and non-zero exit;
-tool denial is verified for claude and pi (no file was created in three claude attempts
-and one pi attempt), and for codex it is a **sandbox** rather than a denial (§6.5) —
-that is the one place the three harnesses are not equal, it was accepted deliberately, and
-it is stated in §1 rather than left for a reader to infer; output **streams** (§6.1b),
-because plain-text mode buffers the whole answer (`claude` wrote nothing for 13 s then
-everything at once), except on codex, which cannot stream; harness and model are
-fixed at init from the command line, with no TUI selection; instructions are read once at
-startup and never reloaded (restart after editing the file); `Ctrl+N` while running is
-ignored like `Ctrl+R`; the name stays `prosecraft`; the rewritten text is delimited by
-`<<<TEXT>>>`/`<<<END>>>` markers so preambles are stripped by protocol, not by heuristic,
-and a missing marker is an error rather than a guess; undo is in scope for the two editable
-buffers and only for them (§4, §9) — a capped per-pane snapshot stack, one step per key
+Instructions travel in the user turn (§6.0, measured). The app resends the source text on
+every rewrite, which is cheap for a few paragraphs. There is one session per run, and there
+is no persistence. `Esc` does nothing. `Ctrl+Q` quits and is the only quit key. `Ctrl+C`
+copies the focused pane, and cancels only in the debug pane after a second press, so the key
+keeps its terminal meaning of copy. The output pane holds final text only. The debug pane
+holds the stream, reasoning, stderr and app events. A spawn clears the output pane. The app
+checks the harness binary at startup, and a missing binary means a stderr error and a
+non-zero exit.
+
+Tool denial holds for claude and pi (three claude attempts and one pi attempt created no
+file). On codex it is a **sandbox** rather than a denial (§6.5). That is the one place where
+the three harnesses are not equal. A human accepted it deliberately, and §1 states it rather
+than leaving it for a reader to infer.
+
+Output **streams** (§6.1b). codex cannot stream. The user fixes the harness and the model at
+init from the command line, and the UI offers no selection. The app reads `--prompt-file` and
+`--text-file` once at startup and never re-reads them, so a restart picks up an edit to
+either file. The
+instructions pane itself is editable, and every rewrite sends it. A `Ctrl+N` while running is
+ignored like `Ctrl+R`. The name stays `prosecraft`. The rewritten text sits between the
+markers `<<<TEXT>>>` and `<<<END>>>`. The markers make extraction a protocol, so a preamble
+cannot leak through and a missing marker is an error rather than a guess. Undo covers the two
+editable buffers and only them (§4, §9): a capped per-pane snapshot stack, one step per key
 event, no redo, and it never reaches `output` or `debug`.
-
-

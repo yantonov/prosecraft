@@ -1,4 +1,5 @@
 ## Active
+- [>] Strip progress from the spec, and bring it in line with the shipped app #spec-truth
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
