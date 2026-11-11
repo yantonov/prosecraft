@@ -1,5 +1,4 @@
 ## Active
-- [>] g4nxst #g4nxst
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
@@ -49,6 +48,7 @@
 - [x] Burst collector: skip key releases instead of ending the run at them #ewphym
 - [x] Burst collector: apply the grace window to the first char too #jspxg2
 - [x] Strip progress from the spec, and bring it in line with the shipped app #spec-truth
+- [x] g4nxst #g4nxst
 - [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]

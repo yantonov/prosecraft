@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: []
 attachments: []
 created: 2026-11-11T14:33:40Z
-updated: 2026-11-11T14:33:45Z
+updated: 2026-11-11T14:34:44Z
+closed-at: 2026-11-11T14:34:44Z
 ---
 # g4nxst
 The paste surface inserts at the cursor today, so a second paste appends a second text to the first. The panes are slots, not documents: the app exists to rewrite one block of prose, and anything that needs real editing is done outside it. So a paste loads the focused editable pane, replacing whatever was there, and a single `Ctrl+Z` is the recovery.
