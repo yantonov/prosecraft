@@ -1,10 +1,11 @@
 ---
-status: open
+status: closed
 priority: 2
 deps: [horaf, li4i2]
 attachments: []
 created: 2026-11-11T11:22:43Z
-updated: 2026-11-11T11:27:24Z
+updated: 2026-11-11T11:49:07Z
+closed-at: 2026-11-11T11:49:07Z
 ---
 # Ctrl+Z: undo the last edits in an editable pane, capped history
 

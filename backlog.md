@@ -1,5 +1,4 @@
 ## Active
-- [ ] Ctrl+Z: undo the last edits in an editable pane, capped history #tqtl6 <- [horaf, li4i2]
 
 ## Closed
 - [x] Bootstrap harness: AGENTS.md + Makefile #harness-bootstrap <- [tui-dummy]
@@ -44,6 +43,7 @@
 - [x] README: codex as a third harness, and the two ways it is not equal #rcbmo <- [x3dtv2]
 - [x] Lift the undo/redo non-goal from the spec #horaf
 - [x] Editor owns every buffer mutation: flatten the public call graph, add Editor::clear #li4i2
+- [x] Ctrl+Z: undo the last edits in an editable pane, capped history #tqtl6 <- [horaf, li4i2]
 - [x] pi adapter #pi-adapter <- [harness-trait, session-lifecycle]
 - [x] Robustness: cancel, timeout, resize, error paths #robustness <- [session-lifecycle]
 - [x] Remove the dead_code allowance from src/editor.rs #editor-dead-code <- [editor-wiring]
