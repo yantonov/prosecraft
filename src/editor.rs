@@ -22,6 +22,8 @@
 //! undo step per char, and a snapshot sitting in a primitive runs mid-operation, on a buffer
 //! that is nobody's resting state.
 
+use std::borrow::Cow;
+
 /// A position in the buffer: a line index and a char index within that line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cursor {
@@ -70,9 +72,14 @@ impl Editor {
         }
     }
 
-    /// Splits `text` on `\n`, so a trailing newline leaves a final empty line and
-    /// [`Editor::text`] reproduces the input exactly.
+    /// Splits `text` on a line break, so a trailing newline leaves a final empty line and
+    /// [`Editor::text`] reproduces the input exactly. The one exception is whitespace
+    /// normalisation ([`canonical`]): a CRLF is one line break and a tab is a space, so text
+    /// that held either does not come back byte-identical.
     pub fn from_text(text: &str) -> Self {
+        // Canonical first, so a CRLF is one break rather than a `\r` that the per-line rule
+        // below would turn into a second one, and so no line can hold a line break inside it.
+        let text = canonical(text);
         let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
         // The end of the text is where a user resumes typing. `split` always yields at least
         // one line, so the subtraction cannot underflow.
@@ -130,10 +137,14 @@ impl Editor {
     /// Newlines inside it are real line breaks, not literal characters: a pane cannot display
     /// one, and pasted prose arrives with them. The cursor ends after the last inserted char.
     ///
+    /// The whole string is canonicalised before the loop, because a CRLF is two chars that mean
+    /// one line break and a per-char rule cannot know that. A paste is where that text comes
+    /// from, so this is the route it matters on.
+    ///
     /// The char loop stays here rather than delegating: one public call is one undo step, so a
     /// paste has to reach the recording boundary once, not once per char.
     pub fn insert_str(&mut self, text: &str) {
-        for c in text.chars() {
+        for c in canonical(text).chars() {
             self.insert_one(c);
         }
     }
@@ -146,6 +157,7 @@ impl Editor {
     /// funnel that other public methods called would make one user action record several undo
     /// steps (spec §9). A snapshot must never be taken here — see the module doc.
     fn insert_one(&mut self, c: char) {
+        let c = normalise(c);
         if c == '\n' {
             self.insert_newline();
             return;
@@ -234,6 +246,47 @@ impl Editor {
             self.cursor = Cursor::new(line + 1, 0);
         }
     }
+}
+
+/// The two whitespace chars a buffer never stores as they arrived.
+///
+/// A tab becomes a space because the renderer draws nothing for one but still counts it as a
+/// char, so a literal tab is invisible in a pane and costs a char the cursor steps over. A
+/// carriage return becomes a line break, so a buffer holds one spelling of "new line".
+///
+/// This is the per-char half of the rule, and the place a *single* char that arrives alone is
+/// normalised: every insert reaches it through [`Editor::insert_one`]. A CRLF is two chars and
+/// is handled by [`canonical`], because no per-char rule can tell one line break from two.
+fn normalise(c: char) -> char {
+    match c {
+        '\r' => '\n',
+        '\t' => ' ',
+        c => c,
+    }
+}
+
+/// `text` in the one form a buffer holds: `\n` as the only line break, `' '` as the only tab.
+///
+/// Collapses `\r\n` to a single break before anything else looks at the text, which is what a
+/// per-char rule cannot do: normalising `\r` and `\n` separately would turn every Windows line
+/// ending into a blank line, so a pasted document would arrive with its paragraphs doubled.
+///
+/// Borrows when there is nothing to change, which is every text the buffer already produced —
+/// most importantly a `\n`-joined snapshot on the undo path, which must stay allocation-free.
+fn canonical(text: &str) -> Cow<'_, str> {
+    if !text.contains(['\r', '\t']) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        // `\r\n` is one break, so the `\n` is consumed rather than normalised a second time.
+        if c == '\r' && chars.peek() == Some(&'\n') {
+            chars.next();
+        }
+        out.push(normalise(c));
+    }
+    Cow::Owned(out)
 }
 
 /// Byte offset of char index `column`, or the line's length when `column` is past the end.
@@ -340,6 +393,51 @@ mod tests {
         ] {
             assert_eq!(editor(text).text(), text, "round trip of {text:?}");
         }
+    }
+
+    #[test]
+    fn a_windows_line_ending_is_one_line_break_not_two() {
+        // The file a user pastes on Windows ends its lines with CRLF. Without collapsing it,
+        // the `\r` would become a second line break and every paragraph gap would double.
+        let editor = editor("first\r\nsecond\r\n");
+
+        assert_eq!(editor.lines(), ["first", "second", ""]);
+        assert_eq!(editor.text(), "first\nsecond\n");
+    }
+
+    #[test]
+    fn a_lone_carriage_return_is_a_line_break() {
+        // A carriage return with no line feed is still a line break to the user, so it lands as
+        // one rather than being stored as an invisible char the pane cannot show.
+        assert_eq!(editor("a\rb").lines(), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_tab_becomes_a_space() {
+        // A literal tab takes no cells when drawn but still counts as a char, so it is
+        // invisible in the pane and the cursor steps over nothing. Whitespace is whitespace
+        // for this app, so it lands as one space.
+        assert_eq!(editor("a\tb").text(), "a b");
+    }
+
+    #[test]
+    fn insert_str_normalises_a_crlf_and_a_tab_the_same_way_from_text_does() {
+        // One rule, two entry points: a paste (`insert_str`) and a startup load (`from_text`)
+        // must not disagree about what a line break or a tab becomes.
+        let mut editor = Editor::new();
+        editor.insert_str("a\tb\r\nc\rd");
+
+        assert_eq!(editor.text(), "a b\nc\nd");
+    }
+
+    #[test]
+    fn a_pasted_crlf_block_keeps_its_paragraph_gaps() {
+        // The reported failure in miniature: three paragraphs separated by CRLF and a blank
+        // line must arrive as three lines and a blank line, not as six lines.
+        let mut editor = Editor::new();
+        editor.insert_str("one\r\n\r\ntwo\r\n\r\nthree");
+
+        assert_eq!(editor.lines(), ["one", "", "two", "", "three"]);
     }
 
     #[test]

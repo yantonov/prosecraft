@@ -148,6 +148,9 @@ impl Tui {
                     }
                 };
                 let outcome = match first {
+                    // A plain char, or the `Enter`/`Tab` that a paste's line breaks and tabs
+                    // arrive as. A char that arrived alone is typing and keeps a key's
+                    // semantics, which is what `collect_text_run` decides below.
                     Event::Key(key) if typed_char(&key).is_some() => {
                         // A paste is delivered as a burst of char events, one per char. Taking
                         // the burst as one string is what makes it one edit and one `Ctrl+Z`;
@@ -192,6 +195,13 @@ impl Tui {
 ///
 /// Plain text only: a modified key is a chord with its own meaning, and a non-char key is not
 /// text at all, so neither can be part of a pasted run.
+///
+/// `Enter` and `Tab` count as the whitespace they produce. A paste never arrives as one
+/// `Event::Paste` on Windows, so its line breaks reach the app as `KeyCode::Enter` and its
+/// tabs as `KeyCode::Tab`; refusing them would end the run at every line break and leave only
+/// the last paragraph of a pasted document in the pane. Only a run that is already open can
+/// contain them, because [`collect_text_run`] decides the first char here before any run
+/// exists: a typed `Enter` or `Tab` still arrives alone and keeps its own meaning.
 fn typed_char(key: &KeyEvent) -> Option<char> {
     if key.kind != KeyEventKind::Press {
         return None;
@@ -204,6 +214,8 @@ fn typed_char(key: &KeyEvent) -> Option<char> {
     }
     match key.code {
         KeyCode::Char(c) => Some(c),
+        KeyCode::Enter => Some('\n'),
+        KeyCode::Tab => Some(' '),
         _ => None,
     }
 }
@@ -468,6 +480,83 @@ mod tests {
         assert_eq!(text, "hello", "the burst was not taken as one string");
         assert_eq!(count, 5, "the run was cut short");
         assert!(ended_by.is_none(), "nothing should have ended the run");
+    }
+
+    #[test]
+    fn a_burst_keeps_a_line_break_instead_of_ending_at_it() {
+        // The reported failure: a pasted document arrives as one char event per character, and
+        // its line breaks as `Enter`. Ending the run there split a five-paragraph file into
+        // five bursts, each of which replaced the pane, so only the last paragraph survived.
+        let enter =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press);
+        let (text, count, _) = run_of(typed('a'), vec![enter, typed('b')]);
+
+        assert_eq!(text, "a\nb", "a line break cut the run");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn a_burst_keeps_a_tab_as_a_space_instead_of_ending_at_it() {
+        // A tab ended the run *and* the leftover `Tab` was routed as a key, so the remainder of
+        // the paste moved focus and landed in the next pane. Whitespace is whitespace here.
+        let tab = KeyEvent::new_with_kind(KeyCode::Tab, KeyModifiers::NONE, KeyEventKind::Press);
+        let (text, count, _) = run_of(typed('a'), vec![tab, typed('b')]);
+
+        assert_eq!(text, "a b", "a tab cut the run");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn a_multiline_paste_is_one_run_through_the_view() {
+        // The end-to-end property: three paragraphs separated by CRLF and a blank line arrive
+        // as one edit, so the pane holds all of them rather than only the last.
+        //
+        // The console delivers a CRLF as a single `Enter`, so that is what this feeds.
+        let enter =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press);
+        let mut script = Vec::new();
+        for c in "ne\r\n\r\ntwo\r\n\r\nthree".chars() {
+            if c == '\r' {
+                script.push(enter);
+            } else if c != '\n' {
+                script.push(typed(c));
+            }
+        }
+        let (text, _, _) = run_of(typed('o'), script);
+
+        let mut view = view();
+        view.handle_text_run(&text);
+
+        assert_eq!(
+            view.source.lines(),
+            ["one", "", "two", "", "three"],
+            "the paste split or lost its paragraphs"
+        );
+        // One edit, so one press puts the pane back.
+        view.handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(view.source.text(), "", "one Ctrl+Z left text behind");
+    }
+
+    #[test]
+    fn a_typed_enter_alone_still_opens_no_run() {
+        // Only a run that is already open may contain `Enter`. A press on its own is a key
+        // with its own meaning, and `collect_text_run` decides that from the *first* char.
+        let enter =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press);
+        let ctrl_z = key(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        let mut script = vec![ctrl_z].into_iter();
+        let (_, count, ended_by) =
+            collect_text_run(enter, |_| Ok(script.next())).expect("the collector failed");
+
+        assert_eq!(count, 1, "a lone Enter was treated as a burst");
+        assert!(
+            ended_by.is_some(),
+            "a lone Enter did not hand the next key back"
+        );
     }
 
     #[test]

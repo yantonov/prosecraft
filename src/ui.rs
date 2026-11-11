@@ -2706,6 +2706,33 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_v_of_a_windows_clipboard_keeps_its_paragraphs() {
+        // The reported failure, through the `Ctrl+V` route: a clipboard copied out of a
+        // document carries CRLF and might carry a tab. Both are whitespace, so both land as
+        // content and the pane holds the whole block rather than one mangled line.
+        let mut view = clipboard_view(
+            Focus::Source,
+            crate::clipboard::Recording::with("one\r\n\r\ntwo\r\n\r\nthree\tend"),
+        );
+
+        view.handle_key(&ctrl_char('v'));
+
+        assert_eq!(
+            view.source.lines(),
+            ["one", "", "two", "", "three end"],
+            "the paste lost a paragraph or split on a line break"
+        );
+        assert_eq!(
+            view.focus,
+            Focus::Source,
+            "the paste moved focus to the next pane"
+        );
+        // Still one edit, so one press puts the previous buffer back.
+        view.handle_key(&ctrl_char('z'));
+        assert_eq!(view.source.text(), "", "one Ctrl+Z left the paste behind");
+    }
+
+    #[test]
     fn ctrl_k_is_one_step_that_restores_the_whole_previous_buffer() {
         for focus in [Focus::Source, Focus::Instructions] {
             let mut view = editing_view(focus, "");
