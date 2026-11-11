@@ -1,10 +1,11 @@
 ---
-status: in_progress
+status: closed
 priority: 2
 deps: []
 attachments: []
 created: 2026-11-11T14:05:00Z
-updated: 2026-11-11T13:17:54Z
+updated: 2026-11-11T13:18:05Z
+closed-at: 2026-11-11T13:18:05Z
 ---
 # Strip progress from the spec, and bring it in line with the shipped app
 
