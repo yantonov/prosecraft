@@ -4,8 +4,8 @@ priority: 2
 deps: []
 attachments: []
 created: 2026-11-11T11:57:19Z
-updated: 2026-11-11T11:59:04Z
-closed-at: 2026-11-11T11:59:04Z
+updated: 2026-11-11T12:23:40Z
+closed-at: 2026-11-11T12:23:40Z
 ---
 # Bracketed paste: a terminal paste is one undo step
 
@@ -26,3 +26,27 @@ Notes:
 - docs/spec.md section 4 lists Ctrl+V as the paste surface and does not mention terminal paste. The spec is frozen (constraint 1), so this ticket adds the code path and no spec edit; whether the key table needs a note is a separate, human-owned decision.
 - The comment at src/ui.rs:526 claims a paste is one undo step without saying it means the Ctrl+V path only; correct it while here.
 - crossterm's bracketed-paste feature is already enabled through its default features, so no Cargo.toml change.
+
+
+
+## Correction (measured): the bracketed-paste claim was wrong for Windows
+
+The note above said Windows Terminal gets the single step. That is false, and the first fix
+(687d2f2) therefore changed nothing on this machine. Measured in the crossterm 0.29 source:
+
+- Event::Paste is only ever produced by sys/unix/parse.rs. The Windows event source
+  (event/source/windows.rs) emits Key, Mouse, Resize and Focus events and never a Paste.
+- crossterm never sets ENABLE_VIRTUAL_TERMINAL_INPUT on Windows either, so the console keeps
+  delivering KEY_EVENT records: a paste arrives as one KeyCode::Char event per character.
+
+The second cause is larger and platform-independent in effect: on Windows Terminal, Ctrl+V is
+bound to the terminal's own paste action (User.paste). The terminal consumes the key, reads the
+clipboard itself, and types the text in. The app's Ctrl+V handler never runs, so the one
+insert_str call that makes a clipboard paste one step is bypassed entirely.
+
+Fix (this commit): the event loop collects a run of char key events and hands the whole string
+to View::handle_text_run, which inserts it in one call. A single typed char still goes through
+handle_key, so typing keeps one step per key and nothing is delayed. Event::Paste remains for
+terminals that do implement the protocol. The wait is zero until two chars have arrived
+together; once a burst is proven a 10 ms grace window drains a paste larger than the console
+input buffer instead of splitting it into several steps.

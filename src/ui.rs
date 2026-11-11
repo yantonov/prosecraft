@@ -509,13 +509,23 @@ impl<'a> View<'a> {
         self.session = session.map(str::to_owned);
     }
 
-    /// A paste the terminal delivered whole, as one edit.
+    /// A run of text the terminal delivered as a burst of char events.
     ///
-    /// Bracketed paste (enabled in `main.rs` beside the alternate screen) turns a paste into
-    /// one `Event::Paste` instead of a burst of char keys, so the undo recording boundary is
-    /// reached once: one `Ctrl+Z` takes the whole fragment back out, byte-identical to the
-    /// state before it, cursor included. `Ctrl+V` is the same rule by the other route, since
-    /// it already inserts the clipboard in a single call.
+    /// The terminal decides how a paste arrives: one `Event::Paste` where bracketed paste is
+    /// implemented, and — on Windows, where `Ctrl+V` is swallowed by the terminal itself — a
+    /// burst of ordinary char events, one per char. This is that second case. The chars are
+    /// already one action by the time they arrive, so the run is handed to [`View::handle_paste`]
+    /// as a single string: one insert, one undo step.
+    pub fn handle_text_run(&mut self, text: &str) -> Outcome {
+        self.handle_paste(text)
+    }
+
+    /// A paste, applied as one edit: the whole string in one `insert_str` call.
+    ///
+    /// The route does not matter — bracketed paste from the terminal, a `Ctrl+V` the app
+    /// handles itself, or a burst of chars collected in `main.rs`. All of them converge here so
+    /// the rule lives in one place: however many chars `text` holds, it is one edit and so one
+    /// `Ctrl+Z`, restoring the text and the cursor together.
     ///
     /// The dismissals come first on the rule a key follows: a toast or the help panel eats the
     /// input that closes it, and the paste is not applied behind it.
@@ -536,11 +546,23 @@ impl<'a> View<'a> {
             self.toast = Some(toast);
             return Outcome::Continue;
         }
+        // An empty paste is nothing to insert, so it is not an edit and records no step.
+        if !text.is_empty() {
+            self.insert_text(text);
+        }
+        Outcome::Continue
+    }
+
+    /// Inserts a whole string into the focused editable pane as one edit.
+    ///
+    /// The single place text lands, shared by both paste routes: one `insert_str` call inside
+    /// one `Undo::edit`, so however many chars `text` holds it is one step. A read-only pane has
+    /// already been refused by the caller, which is what lets this assume an editor exists.
+    fn insert_text(&mut self, text: &str) {
         if let Some((editor, _, undo)) = self.editable(self.focus) {
             undo.edit(editor, |editor| editor.insert_str(text));
         }
         self.message = None;
-        Outcome::Continue
     }
 
     /// `Ctrl+V`: paste the clipboard into the focused pane, at the cursor.
@@ -554,17 +576,12 @@ impl<'a> View<'a> {
         }
         match self.clipboard.get_text() {
             Ok(Some(text)) if !text.is_empty() => {
+                // The clipboard's text goes through the same one-edit path a terminal paste
+                // takes, so all three routes obey one rule (see [`View::handle_paste`]).
                 // `insert_str` routes newlines to `insert_newline`, so pasted prose lands as
                 // real lines rather than one long row. Invalid UTF-8 was already made lossy
                 // when the clipboard was read.
-                // One call, so a clipboard paste is one undo step: a single `Ctrl+Z` takes the
-                // whole block back out. This is the `Ctrl+V` path only; a terminal paste
-                // arrives as `Event::Paste` and is one step for the same reason, see
-                // [`View::handle_paste`].
-                if let Some((editor, _, undo)) = self.editable(self.focus) {
-                    undo.edit(editor, |editor| editor.insert_str(&text));
-                }
-                self.message = None;
+                self.insert_text(&text);
             }
             // An empty clipboard must never wipe a pane, so it is a note and nothing else.
             Ok(_) => self.message = Some("clipboard is empty".to_owned()),

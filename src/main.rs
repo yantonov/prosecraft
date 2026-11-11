@@ -8,9 +8,13 @@ use std::io::{self, Stdout, Write};
 use std::panic;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crossterm::cursor;
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
@@ -123,6 +127,10 @@ impl Tui {
         // Ticking rather than blocking: a live rewrite delivers lines on the child's threads,
         // and nothing can arrive if the loop is parked in `event::read` until the next key
         // (spec §6.1b: drained once per tick, ~16 ms).
+        //
+        // An event the burst collector read but did not use — the key that ended a run — is
+        // handled on the next pass, so draining never drops a keystroke.
+        let mut leftover: Option<Event> = None;
         tick_loop(
             &mut view,
             |view| {
@@ -130,13 +138,48 @@ impl Tui {
                 Ok(())
             },
             |view, timeout| {
-                if !event::poll(timeout)? {
-                    return Ok(Outcome::Continue);
-                }
-                let outcome = match event::read()? {
+                let first = match leftover.take() {
+                    Some(event) => event,
+                    None => {
+                        if !event::poll(timeout)? {
+                            return Ok(Outcome::Continue);
+                        }
+                        event::read()?
+                    }
+                };
+                let outcome = match first {
+                    Event::Key(key) if typed_char(&key).is_some() => {
+                        // A paste is delivered as a burst of char events, one per char. Taking
+                        // the burst as one string is what makes it one edit and one `Ctrl+Z`;
+                        // handling the events one at a time would record one step per char.
+                        //
+                        // The wait is zero until a burst is proven, so a typed char is never
+                        // delayed; once two chars have arrived together a short grace window
+                        // lets a paste larger than the console input buffer be drained without
+                        // splitting it into several undo steps.
+                        let (text, count, ended_by) = collect_text_run(key, |seen| {
+                            let wait = if seen < 2 {
+                                Duration::ZERO
+                            } else {
+                                BURST_GRACE
+                            };
+                            if !event::poll(wait)? {
+                                return Ok(None);
+                            }
+                            event::read().map(Some)
+                        })?;
+                        leftover = ended_by;
+                        if count > 1 {
+                            view.handle_text_run(&text)
+                        } else {
+                            // A single char is just typing, and keeps a key's semantics: focus,
+                            // the help and toast dismissals, and the rest of `handle_key`.
+                            view.handle_key(&key)
+                        }
+                    }
                     Event::Key(key) => view.handle_key(&key),
-                    // A bracketed paste is one event and one edit, which is what makes it one
-                    // `Ctrl+Z` rather than one per char.
+                    // Terminals that do implement bracketed paste (unix, macOS) send the whole
+                    // paste as one event; the collector above covers those that do not.
                     Event::Paste(text) => view.handle_paste(&text),
                     // Resize and every other event leave the state alone; there is still a
                     // frame to draw for them, so they are not a quit.
@@ -146,6 +189,68 @@ impl Tui {
             },
             |view| view.tick(),
         )
+    }
+}
+
+/// The char a key event types, or `None` for anything that is not plain text.
+///
+/// Plain text only: a modified key is a chord with its own meaning, and a non-char key is not
+/// text at all, so neither can be part of a pasted run.
+fn typed_char(key: &KeyEvent) -> Option<char> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    // Shift is allowed: a terminal may report an uppercase letter as `Char('A')` + SHIFT, and
+    // pasted capitals would otherwise end the run at every one of them.
+    match key.modifiers {
+        KeyModifiers::NONE | KeyModifiers::SHIFT => {}
+        _ => return None,
+    }
+    match key.code {
+        KeyCode::Char(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// How long a proven burst waits for the next char.
+///
+/// A console input buffer holds a limited number of records, so a large paste arrives in
+/// chunks. Waiting this long between them keeps the whole paste one edit. It is far below the
+/// gap between two human keypresses, and it never applies to a single typed char, so typing
+/// keeps its own granularity and no keystroke is delayed.
+const BURST_GRACE: Duration = Duration::from_millis(10);
+
+/// Gathers the run of char events the terminal has already queued into one string.
+///
+/// `next` is handed the number of chars collected so far and returns the next event when one is
+/// available, so the caller decides how long to wait: nothing for the first char, a grace window
+/// once a burst is established. The run ends at the first event it does not consume, which is
+/// returned so the caller can handle it on the next pass.
+///
+/// Returns the text, how many chars it holds, and the event that ended the run.
+fn collect_text_run(
+    first: KeyEvent,
+    mut next: impl FnMut(usize) -> io::Result<Option<Event>>,
+) -> io::Result<(String, usize, Option<Event>)> {
+    let mut text = String::new();
+    let mut count = 0;
+    // `typed_char` already proved the first key is text, and a run only ever holds these.
+    if let Some(c) = typed_char(&first) {
+        text.push(c);
+        count += 1;
+    }
+    loop {
+        match next(count)? {
+            Some(Event::Key(key)) => match typed_char(&key) {
+                Some(c) => {
+                    text.push(c);
+                    count += 1;
+                }
+                None => return Ok((text, count, Some(Event::Key(key)))),
+            },
+            Some(other) => return Ok((text, count, Some(other))),
+            None => return Ok((text, count, None)),
+        }
     }
 }
 
@@ -274,6 +379,93 @@ mod tests {
             Event::Key(key) => view.handle_key(key),
             _ => Outcome::Continue,
         }
+    }
+
+    /// A plain char press, which is what a terminal that does not implement bracketed paste
+    /// sends once per character of a paste.
+    fn typed(c: char) -> KeyEvent {
+        KeyEvent::new_with_kind(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Press)
+    }
+
+    /// Feeds `collect_text_run` from a fixed script, so a burst can be driven without a tty.
+    ///
+    /// The script is key events, wrapped into the `Event::Key` the event loop would deliver.
+    fn run_of(first: KeyEvent, script: Vec<KeyEvent>) -> (String, usize, Option<Event>) {
+        let mut script = script.into_iter().map(Event::Key);
+        collect_text_run(first, |_| Ok(script.next())).expect("the collector failed")
+    }
+
+    #[test]
+    fn a_burst_of_chars_becomes_one_string() {
+        // The Windows case: Ctrl+V is swallowed by the terminal, which then types the clipboard
+        // as one char event per character. The run must become a single insert.
+        let (text, count, ended_by) = run_of(
+            typed('h'),
+            vec![typed('e'), typed('l'), typed('l'), typed('o')],
+        );
+
+        assert_eq!(text, "hello", "the burst was not taken as one string");
+        assert_eq!(count, 5, "the run was cut short");
+        assert!(ended_by.is_none(), "nothing should have ended the run");
+    }
+
+    #[test]
+    fn a_burst_ends_at_the_first_non_text_event() {
+        // The key that ends a paste is not part of it, and must be handled on the next pass.
+        let ctrl_z = key(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        let mut script = vec![Event::Key(typed('b')), ctrl_z].into_iter();
+        let (text, count, ended_by) =
+            collect_text_run(typed('a'), |_| Ok(script.next())).expect("the collector failed");
+
+        assert_eq!(text, "ab");
+        assert_eq!(count, 2);
+        match ended_by {
+            Some(Event::Key(key)) => assert_eq!(key.code, KeyCode::Char('z')),
+            other => panic!("the run did not hand back the interrupting key: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_burst_keeps_shifted_letters() {
+        // An uppercase letter may arrive as Char('A')+SHIFT; it must not split the run.
+        let shifted =
+            KeyEvent::new_with_kind(KeyCode::Char('A'), KeyModifiers::SHIFT, KeyEventKind::Press);
+        let (text, count, _) = run_of(typed('a'), vec![shifted]);
+
+        assert_eq!(text, "aA", "a shifted letter cut the run");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn a_release_does_not_count_as_text() {
+        // Windows reports a press and a release; only the press is a typed char.
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        assert_eq!(typed_char(&release), None);
+    }
+
+    #[test]
+    fn one_paste_run_is_one_undo_step() {
+        // The end-to-end property the bug report is about: the run reaches the editor as one
+        // insert, so one Ctrl+Z takes the whole fragment back out.
+        let mut view = view();
+        view.handle_text_run("hello world");
+        assert_eq!(view.source.text(), "hello world");
+
+        view.handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+        assert_eq!(
+            view.source.text(),
+            "",
+            "one Ctrl+Z left part of the pasted fragment behind"
+        );
     }
 
     /// A key must reach the screen: `tick_loop` draws only when a tick asks, so a key applied
