@@ -56,7 +56,8 @@ build-release:
 # copy. The artifact path is the build-release output by construction.
 install: build-release
 	@mkdir -p "$$HOME/.local/bin"
-	@cp target/release/prosecraft "$$HOME/.local/bin/prosecraft"
+	@cp target/release/prosecraft "$$HOME/.local/bin/prosecraft.tmp"
+	@mv -f "$$HOME/.local/bin/prosecraft.tmp" "$$HOME/.local/bin/prosecraft"
 	@echo "Installed: $$HOME/.local/bin/prosecraft"
 
 run:
