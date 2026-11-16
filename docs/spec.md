@@ -137,6 +137,42 @@ Four panes, all focusable. Two columns, 50/50.
 | `F1` | Toggle the key-bindings help panel. Any key closes it, and that key does nothing else |
 | `Esc` | Close the help panel when it is open. Otherwise nothing |
 
+### 4.1 Measured constraint: a text run is not always a paste
+
+On Windows the terminal delivers a paste as one `KeyCode::Char` event per character, and
+`Ctrl+V` never reaches the app because Windows Terminal binds it to its own paste. The app
+collects a run of char events into one string and applies it as **one** edit, which is what
+makes a paste one `Ctrl+Z`. A run is applied through the paste route, and the paste route
+**replaces** the pane rather than inserting at the cursor.
+
+That rule is a heuristic, and it has a cost: the app cannot tell a terminal-injected paste
+from a terminal-spelled key. Measured on Windows Terminal with MSYS2: `Shift+Enter` goes out
+as the keyboard-enhancement sequence `CSI 13;2u`, and the Windows backend reads key records
+rather than escape sequences, so the six characters `[`, `1`, `3`, `;`, `2`, `u` arrive as
+ordinary text in one burst. Applied as a paste, they cleared the pane and left the literal
+`[13;2u` behind, recoverable only with `Ctrl+Z`.
+
+**Decision: a run that spells a sequence is that key, not text.** Before a collected run is
+applied, it is classified:
+
+| Run | Treated as |
+|---|---|
+| ordinary text | a paste: one edit, replaces the pane |
+| `[` + decimal code + optional `;modifiers` + `u` | the key it spells, with the modifiers dropped, routed through the key path |
+| the head of such a sequence, cut short | nothing: dropped, because the pane must not be cleared for something the user never typed |
+
+The modifier is dropped on purpose: the app has no meaning for a shifted `Enter`, so
+`Shift+Enter` acts as plain `Enter`, and a shifted character would arrive unshifted, which is
+what a terminal without the protocol sends anyway.
+
+The fragment case is not hypothetical. The burst window is 10 ms (§9), so a sequence can be
+split across two runs. Without it, a split `CSI 13;2u` would still clear the pane, which is
+the failure this rule exists to remove.
+
+The guard is deliberately narrow: a leading `[`, then only digits, `;` and `u`, at most 16
+characters. A run that carries anything else is prose. A paste may legitimately open with a
+bracket — `[1]`, `table [1;2] here` — and must stay text.
+
 ## 5. Rewrite flow
 
 ```
@@ -698,7 +734,7 @@ crate. Errors are per-module types, so there is no `anyhow` crate.
 
 ```
 src/main.rs          startup, terminal setup/teardown, panic hook that restores the TTY,
-                     the event loop and the paste-burst collector
+                     the event loop, the paste-burst collector and the run classifier (§4.1)
 src/cli.rs           arg parsing and startup validation
 src/layout.rs        pane geometry and focus
 src/ui.rs            pane rendering, keybindings to actions, status line, help panel
@@ -763,6 +799,11 @@ they are the manual script to follow before a harness-related change ships.
    model to write a file leaves no file behind, and a prompt that asks the model to quote
    `AGENTS.md` yields nothing. The debug pane does **not** stream, per §6.1b, and that is not
    a defect.
+7. **Windowed paste and spelled keys.** Run in Windows Terminal, and in a unix terminal.
+   Check: a multi-line paste lands whole, and one `Ctrl+Z` takes it back out. `Ctrl+V` replaces
+   the pane. `Shift+Enter` in the source pane adds a line and **keeps the text already there**
+   rather than showing `[13;2u`; on Windows this is the §4.1 regression, because the terminal
+   sends that key as six ordinary characters.
 
 ## Decisions
 
@@ -790,3 +831,8 @@ markers `<<<TEXT>>>` and `<<<END>>>`. The markers make extraction a protocol, so
 cannot leak through and a missing marker is an error rather than a guess. Undo covers the two
 editable buffers and only them (§4, §9): a capped per-pane snapshot stack, one step per key
 event, no redo, and it never reaches `output` or `debug`.
+
+A windowed terminal cannot tell the app that a run of characters is a paste, so the app
+collects runs and treats them as one edit. A run that spells a keyboard-enhancement sequence
+is the key it spells, and the head of one is dropped; otherwise `Shift+Enter` clears the pane
+(§4.1, measured on Windows Terminal with MSYS2).

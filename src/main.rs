@@ -169,7 +169,14 @@ impl Tui {
                         })?;
                         leftover = ended_by;
                         if count > 1 {
-                            view.handle_text_run(&text)
+                            match classify_run(&text) {
+                                Runs::Text => view.handle_text_run(&text),
+                                // The terminal spelled a key out instead of sending it.
+                                Runs::Key(key) => view.handle_key(&key),
+                                // The head of such a spelling, cut short by the burst window.
+                                // Applying it as a paste would clear the pane for nothing.
+                                Runs::Fragment => Outcome::Continue,
+                            }
                         } else {
                             // A single char is just typing, and keeps a key's semantics: focus,
                             // the help and toast dismissals, and the rest of `handle_key`.
@@ -218,6 +225,73 @@ fn typed_char(key: &KeyEvent) -> Option<char> {
         KeyCode::Tab => Some(' '),
         _ => None,
     }
+}
+
+/// What a collected run of chars actually is.
+///
+/// A run is normally text — that is the whole point of collecting it, since a Windows terminal
+/// types a paste in as one char event per character. But a terminal can also spell a key out
+/// instead of sending it: Shift+Enter goes out as the keyboard-enhancement sequence `CSI 13;2u`,
+/// and this backend reads key records rather than escape sequences, so the six characters
+/// `[13;2u` arrive as ordinary text. Without this, `Ctrl+Z` was the only way back from pressing
+/// Shift+Enter, because a run is applied as a paste and a paste clears the pane before inserting.
+///
+/// Measured on Windows Terminal with MSYS2: the sequence arrives as `[`, `1`, `3`, `;`, `2`, `u`,
+/// six chars in one burst.
+enum Runs {
+    /// Ordinary text: a paste, or a fast burst of typing.
+    Text,
+    /// A complete sequence, and the key it spells.
+    Key(KeyEvent),
+    /// The start of one, cut short by the burst window. Applying it would wipe the pane for
+    /// something the user never typed.
+    Fragment,
+}
+
+fn classify_run(text: &str) -> Runs {
+    match spelled_key(text) {
+        Some(key) => Runs::Key(key),
+        None if is_sequence_head(text) => Runs::Fragment,
+        None => Runs::Text,
+    }
+}
+
+/// The key that `CSI code;modifiers u` spells, if `text` is exactly that sequence.
+///
+/// The modifiers are dropped on purpose: the app has no meaning for a shifted `Enter`, and the
+/// user pressed a key that should behave like the key it is a variant of. A shifted char is
+/// unshifted by the same rule, which is what a terminal without the protocol would have sent.
+fn spelled_key(text: &str) -> Option<KeyEvent> {
+    let body = text.strip_prefix('[')?.strip_suffix('u')?;
+    let (code, modifiers) = match body.split_once(';') {
+        Some((code, modifiers)) => (code, modifiers.split(';').next()?),
+        None => (body, "1"),
+    };
+    if !modifiers.chars().all(|c| c.is_ascii_digit()) || modifiers.is_empty() {
+        return None;
+    }
+    let code: u32 = code.parse().ok()?;
+    let code = match code {
+        13 | 10 => KeyCode::Enter,
+        9 => KeyCode::Tab,
+        27 => KeyCode::Esc,
+        127 => KeyCode::Backspace,
+        code => KeyCode::Char(char::from_u32(code)?),
+    };
+    Some(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+/// Whether `text` could be the beginning of a sequence, so it is plumbing rather than prose.
+///
+/// Deliberately narrow: a leading `[`, then only digits, `;` and `u`, and short. A human cannot
+/// type that inside the burst window, and a paste that opens with `[` and holds nothing but
+/// digits would be a table cell, not prose.
+fn is_sequence_head(text: &str) -> bool {
+    text.len() <= 16
+        && text.starts_with('[')
+        && text[1..]
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ';' || c == 'u')
 }
 
 /// How long a proven burst waits for the next char.
@@ -504,6 +578,77 @@ mod tests {
 
         assert_eq!(text, "a b", "a tab cut the run");
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn a_burst_holding_a_spelled_key_is_that_key_not_a_paste() {
+        // The reported bug: Shift+Enter goes out as `CSI 13;2u`, and this backend reads key
+        // records, so the six characters arrive as text. A run is applied as a paste, and a
+        // paste clears the pane first, so the chord wiped the buffer and left `[13;2u` behind.
+        assert!(
+            matches!(classify_run("[13;2u"), Runs::Key(key) if key.code == KeyCode::Enter),
+            "Shift+Enter was not recognised, so it wiped the pane"
+        );
+        // The bare spelling, with the modifiers omitted, is the same key.
+        assert!(
+            matches!(classify_run("[13u"), Runs::Key(key) if key.code == KeyCode::Enter),
+            "the modifier-less spelling was not recognised"
+        );
+    }
+
+    #[test]
+    fn a_burst_holding_the_head_of_a_spelling_is_neither_text_nor_a_paste() {
+        // The burst window can cut a sequence short. Applying the head as a paste would clear
+        // the pane for something the user never typed, so it is dropped instead.
+        assert!(matches!(classify_run("[13;2"), Runs::Fragment));
+        assert!(matches!(classify_run("["), Runs::Fragment));
+    }
+
+    #[test]
+    fn shift_enter_arriving_as_chars_acts_as_plain_enter() {
+        // The bug as reported: type prose, press Shift+Enter, and the pane was cleared with
+        // `[13;2u` left in it. Driven through the same collector the event loop uses, so this
+        // covers the burst path end to end rather than the classifier alone.
+        let mut view = view();
+        view.handle_text_run("the paragraph I was writing");
+        let before = view.source.text();
+
+        let mut script: Vec<KeyEvent> = "13;2u".chars().map(typed).collect();
+        let (text, count, _) = run_of(typed('['), std::mem::take(&mut script));
+
+        assert_eq!(text, "[13;2u", "the run was not collected as written");
+        assert_eq!(count, 6);
+
+        // The loop's own decision for a multi-char run, applied by hand.
+        match classify_run(&text) {
+            Runs::Key(key) => {
+                view.handle_key(&key);
+            }
+            Runs::Text => panic!("the sequence was applied as a paste"),
+            Runs::Fragment => panic!("the sequence was dropped as a fragment"),
+        }
+
+        assert!(
+            view.source.text() == format!("{before}\n"),
+            "the chord did not act as a plain Enter: {:?}",
+            view.source.text()
+        );
+    }
+
+    #[test]
+    fn prose_that_holds_brackets_and_digits_is_still_text() {
+        // The guard must not eat real content: a paste may open with a bracket.
+        for text in [
+            "[1]",
+            "[13;2u] is how it looks",
+            "table [1;2] here",
+            "[hello]",
+        ] {
+            assert!(
+                matches!(classify_run(text), Runs::Text),
+                "{text:?} was mistaken for a spelling"
+            );
+        }
     }
 
     #[test]

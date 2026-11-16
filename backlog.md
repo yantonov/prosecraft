@@ -11,6 +11,7 @@
 - [x] codex adapter: exec/exec resume argv, agent_message terminal text, thread id from the stream #x3dtv2 <- [r26q4, v2ffc]
 - [x] Wire --harness codex through the CLI, the adapter factory, and the startup lookup #k6rqhh <- [r26q4]
 - [x] Plain q must not quit: it types in an editable pane #lh3k5
+- [x] Shift+Enter clears the pane: a spelled key arrives as a text burst #rvfv5
 - [x] Clipboard: load, copy, paste #clipboard <- [editor-wrap, tui-dummy]
 - [x] Editor core: buffer, cursor, edit operations #editor-widget <- [layout-panes, tui-dummy]
 - [x] Four-pane layout and focus cycling #layout-panes <- [args-cli, tui-dummy]
